@@ -217,6 +217,11 @@ void control_thread(std::string path) {
         datawatch::command(line.substr(6));
         continue;
       }
+      if (line.rfind("fps ", 0) == 0) {  // "fps N": frame limit (config.h fps_limit; -1 console pacing, 0 unlimited)
+        cfg().fps_limit = std::atof(line.c_str() + 4);
+        LOG_I("pad", "control: frame limit %g", cfg().fps_limit);
+        continue;
+      }
       if (line.rfind("dialog ", 0) == 0) {  // answers for system dialogs (sysdialog.h)
         sysdlg::queue_answers(line.substr(7));
         continue;

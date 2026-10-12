@@ -102,6 +102,7 @@ int main(int argc, char** argv) {
     else if (a == "--priority") c.priority = next();
     else if (a == "--gpu-timing") c.gpu_timing = 1;
     else if (a == "--present-delay") c.present_delay_ms = std::atof(next().c_str());
+    else if (a == "--fps-limit") c.fps_limit = std::atof(next().c_str());
     else if (a == "--gpu-timing-draws") c.gpu_timing = 2;
     else if (a == "--spu-cache") c.spu_cache = next();
     else if (a == "--shot-interval") c.shot_interval = std::atof(next().c_str());

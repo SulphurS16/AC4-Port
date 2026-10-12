@@ -44,6 +44,8 @@ struct Config {
   std::string priority;             // process priority class: "" (normal), "above-normal", "high"
   int gpu_timing = 0;               // GPU time per pass (gpu/gpu_timing.h), logged every 5 s; 2: per draw
   double present_delay_ms = 0;      // diagnostics: extra time per flip (emulates a slow GPU / low frame rate)
+  double fps_limit = -1;            // frame limit: < 0 the console's pacing (one flip per 59.94 Hz vblank),
+                                    // > 0 flips paced at this rate, 0 unlimited
   std::string spu_cache;            // where collected SPU code records are written
   std::string shader_cache;         // compiled HLSL (derived from the game's shaders; machine-local)
 };

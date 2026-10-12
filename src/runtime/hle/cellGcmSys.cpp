@@ -190,6 +190,8 @@ bool reserve(ppu::Ctx& ctx, u32 c, u32 words) {
 // the default context, submits the commands written so far (put = current), as a flush would.
 s32 cellGcmSetFlip(ppu::Ctx& ctx, u32 c, u32 id) {
   if (id > 7) return CELL_GCM_ERROR_FAILURE;
+  static std::atomic<u32> last_site{0};  // diagnostics: the game's present path(s)
+  if (u32 lr = u32(ctx.lr); last_site.exchange(lr) != lr) LOG_I("gcm", "cellGcmSetFlip from 0x%08x (context 0x%08x)", lr, c);
   if (!reserve(ctx, c, 2)) return CELL_GCM_ERROR_FAILURE;
   Ptr<ContextData> cd(c);
   _cellGcmSetFlipCommand(cd, id);

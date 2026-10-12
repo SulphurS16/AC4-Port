@@ -48,6 +48,11 @@ u64 vblank_count();
 
 // Starts the RSX command processor and vblank threads (called once by cellGcmInit).
 void start();
+// A movie frame was fetched for display (game hook on its cellSail graphics adapter wrapper). The
+// adapter picks frames by the flip times it is given (cellGcmGetLastFlipTime): while movies play,
+// flips keep the console's 59.94 Hz cadence even when a different frame limit is selected.
+void note_movie_frame();
+
 // Blocks until the FIFO read pointer (io offset) is outside [lo, hi]: a command buffer segment the
 // game wants to reuse has been consumed. Woken by the FIFO thread; no spinning.
 void wait_get_outside(u32 lo, u32 hi);

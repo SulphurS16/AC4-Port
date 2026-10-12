@@ -122,6 +122,42 @@ inline void notify_get(u32 get) {
 }
 }  // namespace
 
+// --fps-limit N: flips at most N times per second, on an even schedule (a late frame does not
+// make the next ones early: the schedule restarts after a miss). Coarse waits sleep on a
+// high-resolution timer; the last fraction of a millisecond spins for precision.
+std::atomic<s64> g_movie_frame_qpc{0};
+void note_movie_frame() {
+  LARGE_INTEGER now;
+  QueryPerformanceCounter(&now);
+  g_movie_frame_qpc.store(now.QuadPart, std::memory_order_relaxed);
+}
+bool movie_playing() {
+  static LARGE_INTEGER freq{};
+  if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+  LARGE_INTEGER now;
+  QueryPerformanceCounter(&now);
+  s64 last = g_movie_frame_qpc.load(std::memory_order_relaxed);
+  return last && now.QuadPart - last < freq.QuadPart / 4;  // a frame fetched in the last 250 ms
+}
+
+void pace_flip(double rate) {
+  static LARGE_INTEGER freq{}, next{};
+  if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+  const s64 period = s64(double(freq.QuadPart) / rate);
+  LARGE_INTEGER now;
+  QueryPerformanceCounter(&now);
+  if (!next.QuadPart || now.QuadPart - next.QuadPart > period) next.QuadPart = now.QuadPart;  // first flip or missed
+  for (;;) {
+    QueryPerformanceCounter(&now);
+    s64 left = next.QuadPart - now.QuadPart;
+    if (left <= 0) break;
+    double us = double(left) * 1e6 / double(freq.QuadPart);
+    if (us > 1500) lv2::sleep_us(u64(us - 1000));
+    else _mm_pause();
+  }
+  next.QuadPart += period;
+}
+
 void wait_get_outside(u32 lo, u32 hi) {
   auto* ctrl_get = reinterpret_cast<volatile u32*>(ppu::mem() + kControlAddr + 4);
   auto outside = [&] {
@@ -318,10 +354,24 @@ void do_flip(u32 id) {
     }
     lv2::sleep_us(u64(ms * 1000));
   }
-  if (g_flip_mode.load() == 1 || g_flip_vblank == g_vblank.load()) {
-    std::unique_lock lk(g_vb_mu);
-    u64 v = g_vblank.load();
-    g_vb_cv.wait_for(lk, std::chrono::milliseconds(50), [&] { return g_vblank.load() != v; });
+  double limit = cfg().fps_limit;
+  if (limit >= 0 && movie_playing()) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      LOG_I("rsx", "frame limit: movies keep the console's 59.94 Hz flip cadence (their frames are picked by flip time)");
+    }
+    limit = -1;
+  }
+  if (limit < 0) {
+    // The console's pacing: at most one flip per vertical blank of the emulated 59.94 Hz display.
+    if (g_flip_mode.load() == 1 || g_flip_vblank == g_vblank.load()) {
+      std::unique_lock lk(g_vb_mu);
+      u64 v = g_vblank.load();
+      g_vb_cv.wait_for(lk, std::chrono::milliseconds(50), [&] { return g_vblank.load() != v; });
+    }
+  } else if (limit > 0) {
+    pace_flip(limit);
   }
   g_flip_vblank = g_vblank.load();
   DisplayBuffer b;

@@ -7,3 +7,5 @@
 0x00b6b148 view_turn_set          # AC view slot 6: turn command setter (r3 view, f1); player call returns to 0xb52708
 0x00b67970 view_pitch_set         # AC view slot 9: look pitch thunk to slot 8 (0xb6b2a4); player calls return to 0xb52800 / 0xb52c30
 0x00a372e8 look_update            # an AC's look control: turn (0xa36c6c), pitch command, pitch integrator (0xa36684, state +48)
+0x001406b8 present                # frame pacer: flip buffer +16; mode 1 (+4) repeats the flip above the target rate (+32)
+0x00d30e6c movie_get_frame        # movie frame fetch (cellSailGraphicsAdapterGetFrame wrapper); 0xd30e04 feeds the last flip time to UpdateAvSync
