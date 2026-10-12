@@ -94,12 +94,35 @@ void advance_period(u64 now_us) {
   for (u32 q : queues) lv2::event_queue_send(q, 0, 0 /*CELL_AUDIO_EVENT_MIX*/, 0, 0);
 }
 
+// Output level and continuity, logged every 5 s while ports run: periods mixed, RMS and peak of
+// the mixed stereo signal (dBFS), samples clipped to [-1, 1], and device underruns (the device's
+// queue had run dry before a period was written: an audible gap).
+struct Meter {
+  u64 periods = 0, clipped = 0, underruns = 0, active = 0;
+  double sum_sq = 0, peak = 0;
+  u64 since_us = 0;
+};
+
+void meter_report(Meter& m, u64 now_us) {
+  if (m.active) {
+    double rms = m.sum_sq > 0 ? std::sqrt(m.sum_sq / double(m.periods * kSamples * 2)) : 0;
+    auto db = [](double v) { return v > 0 ? 20 * std::log10(v) : -999.0; };
+    LOG_I("audio", "output %.1f s: %llu periods (%llu with running ports), RMS %.1f dBFS, peak %.1f dBFS, %llu clipped, %llu device underruns",
+          double(now_us - m.since_us) / 1e6, (unsigned long long)m.periods, (unsigned long long)m.active, db(rms), db(m.peak),
+          (unsigned long long)m.clipped, (unsigned long long)m.underruns);
+  }
+  m = Meter{};
+  m.since_us = now_us;
+}
+
 void audio_thread() {
   SetThreadDescription(GetCurrentThread(), L"cellAudio");
   bool dev = audio::out_init();
   std::vector<float> out(kSamples * 2);
   u64 next = lv2::system_time_us();
   const u32 target = 3 * kSamples + 960;  // keep ~36 ms queued in the device
+  Meter meter;
+  meter.since_us = next;
   for (;;) {
     if (dev) {
       while (audio::out_queued_frames() > target) lv2::sleep_us(1000);
@@ -108,10 +131,26 @@ void audio_thread() {
       if (next > now) lv2::sleep_us(next - now);
       next += kPeriodUs;
     }
+    bool running = false;
+    {
+      std::lock_guard lk(g_mu);
+      for (const Port& p : g_ports) running |= p.state == 2;
+    }
+    if (dev && running && audio::out_queued_frames() == 0 && meter.active) ++meter.underruns;
     mix_period(out);
-    for (float& f : out) f = std::clamp(f, -1.0f, 1.0f);
+    for (float& f : out) {
+      double a = std::fabs(f);
+      if (a > 1.0) ++meter.clipped;
+      f = std::clamp(f, -1.0f, 1.0f);
+      meter.sum_sq += double(f) * double(f);
+      meter.peak = std::max(meter.peak, std::min(a, 1.0));
+    }
+    ++meter.periods;
+    if (running) ++meter.active;
     if (dev) audio::out_write(out.data(), kSamples);
-    advance_period(lv2::system_time_us());
+    u64 now = lv2::system_time_us();
+    advance_period(now);
+    if (now - meter.since_us >= 5000000) meter_report(meter, now);
   }
 }
 
