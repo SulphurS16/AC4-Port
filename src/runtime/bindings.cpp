@@ -72,41 +72,46 @@ const char* const kDefault = R"(# Armored Core 4 (native port): keyboard and mou
 #         Left, Right, Home, End, PageUp, PageDown, Insert, Delete, CapsLock, Mouse1 (left), Mouse2
 #         (right), Mouse3 (middle), Mouse4, Mouse5, WheelUp, WheelDown
 # Mouse buttons and the wheel count only while the window has captured the mouse (click into it;
-# F1 or switching away releases it). PROVISIONAL default: the button roles in the comments below
-# come from the ACFA port and still have to be checked against Armored Core 4's own controls.
+# F1 or switching away releases it). The default follows the game's control TYPE A (SYSTEM >
+# CONTROL OPTIONS > KEY CONFIGURATION, checked in the game 2026-10-12).
 
-# Movement (left stick) and view (right stick; the mouse is the main way to look)
+# MOVE (left stick)
 lstick_up = W
 lstick_down = S
 lstick_left = A
 lstick_right = D
+
+# SIGHT (right stick: turn left/right, look up/down; R3 reset view). The mouse is meant to be the
+# main way to look; these keys give the stick's full rate.
 rstick_up = Num8
 rstick_down = Num5, Num2
 rstick_left = Num4
 rstick_right = Num6
+r3 = C
 
-# Weapons: right arm, left arm, shoulder; switch right / left arm weapon
-cross = Mouse1, Enter
-square = Mouse2
-r1 = F, Mouse3
-circle = R, Backspace
-triangle = Q
-
-# Boosts: boost (hold to rise), quick boost, overed boost
+# BOOST: boost (L2), quick boost (R2), over boost (Triangle)
 l2 = Space
 r2 = Shift
-l1 = E
+triangle = E
 
-# View reset, pause, menus
-r3 = C
-l3 = Z
+# WEAPON: use right / left / shoulder weapon (Cross / Square / Circle); switch right / left weapon
+# (R1 / L1; hold to reload that arm's magazine). Purge = the use key + both switch keys.
+cross = Mouse1, Enter
+square = Mouse2
+circle = F, Mouse3, Backspace
+r1 = R, WheelUp
+l1 = Q, WheelDown
+
+# LOCK: lock on target (L3; hold to switch lock mode)
+l3 = Ctrl, Mouse4
+
+# MISC: pause (Start), Select; menus use the arrow keys, Enter (accept), Backspace (back)
 start = Escape
 select = Tab
 up = Up
 down = Down
 left = Left
 right = Right
-
 [mouse]
 # Rotation per raw mouse count, relative to the default (1.0). No acceleration or smoothing.
 sensitivity = 1.0

@@ -21,10 +21,20 @@ namespace {
 std::atomic<int> g_active{0};
 std::mutex g_mu;  // one dialog at a time
 
-// ---- scripted answers (--dialog) ----
+// ---- scripted answers (--dialog, and live "dialog ..." control commands) ----
 std::deque<std::string> g_script;
 bool g_script_parsed = false;
+std::mutex g_live_mu;
+std::deque<std::string> g_live;  // answers queued while running; used before the --dialog script
+bool take_live(std::string* answer) {
+  std::lock_guard lk(g_live_mu);
+  if (g_live.empty()) return false;
+  *answer = g_live.front();
+  g_live.pop_front();
+  return true;
+}
 bool scripted(std::string* answer) {
+  if (take_live(answer)) return true;
   if (!g_script_parsed) {
     g_script_parsed = true;
     const std::string& s = cfg().dialog_script;
@@ -180,6 +190,32 @@ LRESULT CALLBACK dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_TIMER: {
       if (!d) break;
+      if (std::string ans; take_live(&ans)) {  // a live answer for the dialog already on screen
+        LOG_I("sysdlg", "open dialog: live answer '%s'", ans.c_str());
+        if (d->kind == Dlg::Text) {
+          if (ans.rfind("text:", 0) == 0) {
+            d->edit_text = widen(ans.substr(5)).substr(0, d->max_chars);
+            finish(d, 1);
+          } else {
+            finish(d, 0);
+          }
+        } else if (d->kind == Dlg::List) {
+          int r = -1;
+          if (ans.rfind("choose:text=", 0) == 0) {
+            std::wstring want = widen(ans.substr(12));
+            for (size_t i = 0; i < d->rows.size() && r < 0; ++i)
+              if ((d->rows[i] + L"\n" + d->details[i]).find(want) != std::wstring::npos) r = int(i);
+          } else if (ans.rfind("choose:", 0) == 0 && ans != "choose:cancel") {
+            r = std::atoi(ans.c_str() + 7);
+          }
+          finish(d, r >= 0 && r < int(d->rows.size()) ? r : -1);
+        } else if (d->kind == Dlg::Question) {
+          finish(d, ans == "yes" ? 1 : 0);
+        } else {
+          finish(d, 0);
+        }
+        return 0;
+      }
       u32 now = pad_now(), edge = now & ~d->pad_last;
       d->pad_last = now;
       if (d->kind == Dlg::List && (edge & (P_UP | P_DOWN))) {
@@ -324,6 +360,16 @@ bool show(Dlg* d) {
 }  // namespace
 
 bool active() { return g_active.load() > 0; }
+
+void queue_answers(const std::string& csv) {
+  std::lock_guard lk(g_live_mu);
+  for (size_t p = 0; p <= csv.size();) {
+    size_t q = csv.find(',', p);
+    if (q == std::string::npos) q = csv.size();
+    g_live.push_back(csv.substr(p, q - p));
+    p = q + 1;
+  }
+}
 
 void abort() {
   if (HWND w = g_open_wnd.load()) PostMessageW(w, WM_CLOSE, 0, 0);

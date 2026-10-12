@@ -32,5 +32,8 @@ bool text_input(const std::string& prompt, const std::u16string& initial, u32 ma
 void abort();
 // A dialog is open (the pad is held by the system).
 bool active();
+// Live answers (control command "dialog ANSWER,..."; same syntax as --dialog): they answer the
+// dialog on screen, then the next ones, before any --dialog answers.
+void queue_answers(const std::string& csv);
 
 }  // namespace rt::sysdlg

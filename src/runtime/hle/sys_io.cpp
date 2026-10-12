@@ -217,6 +217,10 @@ void control_thread(std::string path) {
         datawatch::command(line.substr(6));
         continue;
       }
+      if (line.rfind("dialog ", 0) == 0) {  // answers for system dialogs (sysdialog.h)
+        sysdlg::queue_answers(line.substr(7));
+        continue;
+      }
       if (line.rfind("turntrace ", 0) == 0) {  // game_input.h
         game::turn_trace(std::atoi(line.c_str() + 10));
         continue;
