@@ -7,6 +7,7 @@
 #include <cfloat>
 #include <climits>
 #include <cmath>
+#include <csetjmp>
 #include <cstring>
 
 #include "ppu/ppu_context.h"
@@ -28,6 +29,27 @@ void bad_switch(Ctx& ctx, u32 pc, u32 target);
 u64 timebase();
 u64 read_spr(Ctx& ctx, u32 pc, u32 spr);       // uncommon SPRs
 void write_spr(Ctx& ctx, u32 pc, u32 spr, u64 v);
+
+// Guest setjmp/longjmp (the game's own functions, named "setjmp"/"longjmp" in its hooks file).
+// A recompiled function that calls the guest setjmp also runs a host setjmp at that call, since
+// the guest call may "return twice": the generated code is
+//   if (setjmp(sj_push(ctx, __sjs)->jb) == 0) f_<setjmp>(ctx); else sj_resume(ctx);
+// with SjScope __sjs at the top of the function. The guest longjmp (runtime hook) finds the most
+// recent live call for its buffer on this thread and longjmps there (the CRT's longjmp unwinds
+// the host frames in between); sj_resume then runs the game's longjmp code, which restores the
+// guest registers from the buffer and sets r3 to the value, as setjmp's second return.
+struct SjEntry {
+  jmp_buf jb;
+  u32 buf = 0;                 // guest jmp_buf address
+  const void* scope = nullptr; // the SjScope of the recompiled function that registered it
+};
+struct SjScope {
+  size_t depth;  // entries below belong to callers; the rest are this frame's (popped on exit)
+  SjScope();
+  ~SjScope();
+};
+SjEntry* sj_push(Ctx& ctx, SjScope& scope);  // for the guest buffer in r3
+void sj_resume(Ctx& ctx);
 u32 lwarx32(Ctx& ctx, u32 ea);                  // reservation load (see runtime)
 u64 ldarx64(Ctx& ctx, u32 ea);
 bool stcx32(Ctx& ctx, u32 ea, u32 v);           // reservation store

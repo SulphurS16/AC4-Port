@@ -14,6 +14,9 @@ struct EmitOptions {
   // emitted as f_<addr>_guest and f_<addr> calls ppu::hook_<name>(ctx, f_<addr>_guest), so direct
   // and indirect calls both reach the hook, which decides when to run the original.
   std::map<u32, std::string> hooks;
+  // The guest's setjmp (hooks file entry "setjmp", executable only): direct calls to it may
+  // return twice, so they are emitted with host setjmp handling (ppu_recomp.h SjEntry/SjScope).
+  u32 setjmp_addr = 0;
 };
 
 // Writes ppu_gen_*.cpp, ppu_functab.cpp and gen_info.txt into out_dir. Files whose contents are

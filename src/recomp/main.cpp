@@ -156,7 +156,8 @@ int main(int argc, char** argv) {
             std::istringstream ls(line);
             std::string addr, name;
             if (!(ls >> addr >> name)) continue;
-            opt.hooks[u32(std::stoul(addr, nullptr, 0))] = name;
+            if (name == "setjmp") opt.setjmp_addr = u32(std::stoul(addr, nullptr, 0));  // call sites, not a hook
+            else opt.hooks[u32(std::stoul(addr, nullptr, 0))] = name;
           }
           std::printf("%zu hook(s)\n", opt.hooks.size());
         }

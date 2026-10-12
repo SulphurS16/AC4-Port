@@ -23,9 +23,22 @@ struct FnEmitter {
   const Function& f;
   std::set<u32>& refs;
   bool comments;
+  u32 setjmp_addr;  // EmitOptions::setjmp_addr for this unit (0: none)
   std::string out;
 
   bool is_func(u32 a) const { return an.functions().count(a) != 0; }
+  // A call to the guest setjmp: it may return twice (ppu_recomp.h).
+  bool is_setjmp_call(u32 pc, u32 w) const {
+    if (!setjmp_addr) return false;
+    u32 op = w >> 26;
+    if (op == 18 && (w & 1)) return (((w & 2) ? 0 : pc) + u32(li(w))) == setjmp_addr;  // bl
+    if (op == 16 && (w & 1)) return (((w & 2) ? 0 : pc) + u32(bd(w))) == setjmp_addr;  // bcl
+    return false;
+  }
+  std::string setjmp_call(u32 t) {
+    refs.insert(t);
+    return strprintf("if(setjmp(ppu::sj_push(ctx,__sjs)->jb)==0)f_%08x(ctx);else ppu::sj_resume(ctx);", t);
+  }
   std::string call(u32 t) {
     if (is_func(t)) {
       refs.insert(t);
@@ -146,7 +159,7 @@ bool FnEmitter::insn(u32 pc, u32 w) {
     case Op::B: {
       u32 t = (aa(w) ? 0 : pc) + u32(li(w));
       if (lk(w)) {
-        line(strprintf("ctx.lr=0x%08xu;", pc + 4) + call(t));
+        line(strprintf("ctx.lr=0x%08xu;", pc + 4) + (is_setjmp_call(pc, w) ? setjmp_call(t) : call(t)));
         return true;
       }
       line(jump(t));
@@ -156,7 +169,8 @@ bool FnEmitter::insn(u32 pc, u32 w) {
       u32 t = (aa(w) ? 0 : pc) + u32(bd(w));
       std::string cnd = cond(d, a);
       if (lk(w)) {
-        std::string body = strprintf("ctx.lr=0x%08xu;", pc + 4) + (t == pc + 4 ? std::string() : call(t));
+        std::string body = strprintf("ctx.lr=0x%08xu;", pc + 4) +
+                           (t == pc + 4 ? std::string() : is_setjmp_call(pc, w) ? setjmp_call(t) : call(t));
         line(cnd.empty() ? body : "if(" + cnd + "){" + body + "}");
         return true;
       }
@@ -699,6 +713,11 @@ void FnEmitter::body(const std::string& hook) {
                      hook.c_str(), f.entry, f.entry, hook.c_str(), f.entry);
   out += strprintf(hook.empty() ? "void f_%08x(Ctx& __restrict ctx){\n" : "void f_%08x_guest(Ctx& __restrict ctx){\n", f.entry);
   const auto& v = f.insns;
+  for (u32 pc : v)  // calls the guest setjmp: its live calls are registered for this frame
+    if (is_setjmp_call(pc, img.r32(pc))) {
+      out += "  ppu::SjScope __sjs;\n";
+      break;
+    }
   for (size_t i = 0; i < v.size(); ++i) {
     u32 pc = v[i];
     if (f.labels.count(pc)) out += strprintf("L_%08x:\n", pc);
@@ -763,7 +782,7 @@ void emit_all(const std::vector<Unit>& units, const std::string& out_dir, const 
       in_file = 0;
     };
     for (const auto& [e, f] : u.an->functions()) {
-      FnEmitter fe{*u.img, *u.an, f, refs, opt.comments, {}};
+      FnEmitter fe{*u.img, *u.an, f, refs, opt.comments, u.prefix == "ppu" ? opt.setjmp_addr : 0u, {}};
       auto hk = opt.hooks.find(e);
       fe.body(hk == opt.hooks.end() ? std::string() : hk->second);
       bodies += fe.out;
