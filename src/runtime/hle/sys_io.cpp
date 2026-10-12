@@ -499,6 +499,22 @@ s32 cellPadSetSensorMode(u32 port, u32 mode) {
   g_sensor_mode[port] = mode;
   return CELL_OK;
 }
+// Whether the pad on a port supports pressure-sensitive buttons / motion sensors: 1 or 0, or an
+// error (every connected pad here reports both, as a DUALSHOCK 3 does).
+s32 cellPadInfoPressMode(u32 port) {
+  std::lock_guard lk(g_mu);
+  if (!g_init) return PAD_ERR_UNINITIALIZED;
+  if (port >= kMaxPads) return PAD_ERR_INVALID_PARAMETER;
+  if (port >= g_max || !read_port(port).connected) return PAD_ERR_NO_DEVICE;
+  return 1;
+}
+s32 cellPadInfoSensorMode(u32 port) {
+  std::lock_guard lk(g_mu);
+  if (!g_init) return PAD_ERR_UNINITIALIZED;
+  if (port >= kMaxPads) return PAD_ERR_INVALID_PARAMETER;
+  if (port >= g_max || !read_port(port).connected) return PAD_ERR_NO_DEVICE;
+  return 1;
+}
 struct ActParam {
   u8 motor[2], reserved[6];
 };
@@ -561,6 +577,8 @@ static hle::Module s_module("sys_io", {
     HLE_FN(cellPadGetCapabilityInfo),
     HLE_FN(cellPadGetData),
     HLE_FN(cellPadGetInfo),
+    HLE_FN(cellPadInfoPressMode),
+    HLE_FN(cellPadInfoSensorMode),
     HLE_FN(cellPadInit),
     HLE_FN(cellPadSetActDirect),
     HLE_FN(cellPadSetPressMode),

@@ -26,6 +26,7 @@ std::mutex g_mu;
 u32 g_io_address = 0, g_io_size = 0, g_local_size = 0;
 u32 g_cmd_begin = 0, g_cmd_fragments = 0;
 u32 g_context_opd = 0;
+u32 g_current_context_ptr = 0;  // the game's current-context variable (_cellGcmInitBody's first argument)
 
 struct Tile {
   u8 location, comp, bank;
@@ -90,6 +91,7 @@ s32 _cellGcmInitBody(Ptr<be32> context, u32 cmd_size, u32 io_size, u32 io_addres
   c->current = io_address + 4096;
   c->callback = g_context_opd;
   *context = rsx::kContextAddr;
+  g_current_context_ptr = context.addr;
   // Control register: RSX starts at the context begin offset.
   ppu::w32(rsx::kControlAddr, 0x1000);
   ppu::w32(rsx::kControlAddr + 4, 0x1000);
@@ -179,6 +181,48 @@ void _cellGcmSetFlipCommand(Ptr<ContextData> c, u32 id) {
   c->current = cur + 8;
 }
 
+// Makes room for `words` command words the way libgcm's reserve does: when the context is full,
+// its callback(context, words) flushes it and moves it to the next segment.
+bool reserve(ppu::Ctx& ctx, u32 c, u32 words) {
+  Ptr<ContextData> cd(c);
+  if (u64(cd->current) + 4ull * words <= u64(cd->end)) return true;
+  s32 r = s32(hle::call_guest(ctx, cd->callback, {c, words}));
+  if (r != CELL_OK) LOG_E("gcm", "command buffer callback of context 0x%08x failed (0x%08x)", c, u32(r));
+  return r == CELL_OK;
+}
+
+// SDK 1.x library forms of the flip commands (later SDKs inline them into the game).
+// cellGcmSetFlip(context, id): queues the flip of display buffer `id` (GCM_FLIP_COMMAND) and, on
+// the default context, submits the commands written so far (put = current), as a flush would.
+s32 cellGcmSetFlip(ppu::Ctx& ctx, u32 c, u32 id) {
+  if (id > 7) return CELL_GCM_ERROR_FAILURE;
+  if (!reserve(ctx, c, 2)) return CELL_GCM_ERROR_FAILURE;
+  Ptr<ContextData> cd(c);
+  _cellGcmSetFlipCommand(cd, id);
+  if (c == rsx::kContextAddr) {
+    u32 put = offset_of(cd->current);
+    reinterpret_cast<std::atomic<u32>*>(ppu::mem() + rsx::kControlAddr)->store(__builtin_bswap32(put));
+  }
+  return CELL_OK;
+}
+// cellGcmSetWaitFlip(context): makes the RSX wait until the queued flip has completed before it
+// processes later commands: a semaphore acquire of 0 on label 1 (the flip semaphore, cleared by
+// each completed flip).
+void cellGcmSetWaitFlip(ppu::Ctx& ctx, u32 c) {
+  if (!reserve(ctx, c, 3)) return;
+  Ptr<ContextData> cd(c);
+  u32 cur = cd->current;
+  ppu::w32(cur, (2u << 18) | rsx::m::SEMAPHORE_OFFSET_406E);
+  ppu::w32(cur + 4, 0x10);
+  ppu::w32(cur + 8, 0);  // SEMAPHORE_ACQUIRE value
+  cd->current = cur + 12;
+}
+// cellGcmSetDefaultCommandBuffer(): makes the default context the game's current context again.
+void cellGcmSetDefaultCommandBuffer() {
+  LOG_D("gcm", "cellGcmSetDefaultCommandBuffer()");
+  if (g_current_context_ptr) ppu::w32(g_current_context_ptr, rsx::kContextAddr);
+}
+
 }  // namespace
 
 static hle::Module s_module("cellGcmSys", {
@@ -194,13 +238,16 @@ static hle::Module s_module("cellGcmSys", {
     HLE_FN(cellGcmGetReport),
     HLE_FN(cellGcmGetTiledPitchSize),
     HLE_FN(cellGcmResetFlipStatus),
+    HLE_FN(cellGcmSetDefaultCommandBuffer),
     HLE_FN(cellGcmSetDisplayBuffer),
+    HLE_FN(cellGcmSetFlip),
     HLE_FN(cellGcmSetFlipHandler),
     HLE_FN(cellGcmSetFlipMode),
     HLE_FN(cellGcmSetGraphicsHandler),
     HLE_FN(cellGcmSetInvalidateTile),
     HLE_FN(cellGcmSetTile),
     HLE_FN(cellGcmSetVBlankHandler),
+    HLE_FN(cellGcmSetWaitFlip),
     HLE_RAW(cellGcmSetZcull),
 });
 

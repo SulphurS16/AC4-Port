@@ -20,6 +20,8 @@ constexpr s32 SCE_NP_BASIC_ERROR_INVALID_ARGUMENT = s32(0x8002a665);
 constexpr s32 SCE_NP_BASIC_ERROR_NO_EVENT = s32(0x8002a66a);
 constexpr s32 SCE_NP_BASIC_ERROR_EXCEEDS_MAX = s32(0x8002a66b);
 constexpr s32 SCE_NP_BASIC_ERROR_NOT_REGISTERED = s32(0x8002a66d);
+constexpr s32 SCE_NP_BASIC_ERROR_INVALID_DATA_ID = s32(0x8002a673);
+constexpr s32 SCE_NP_BASIC_ERROR_NOT_CONNECTED = s32(0x8002a678);
 constexpr s32 SCE_NP_UTIL_ERROR_INVALID_ARGUMENT = s32(0x8002ab01);
 constexpr s32 SCE_NP_UTIL_ERROR_NOT_MATCH = s32(0x8002ab0f);
 constexpr s32 SCE_NP_COMMUNITY_ERROR_ALREADY_INITIALIZED = s32(0x8002a101);
@@ -151,6 +153,27 @@ s32 sceNpBasicRegisterContextSensitiveHandler(u32 comm_id, u32 handler, u32 arg)
   g_basic_arg = arg;
   return CELL_OK;
 }
+s32 sceNpBasicRegisterHandler(u32 comm_id, u32 handler, u32 arg) {
+  return sceNpBasicRegisterContextSensitiveHandler(comm_id, handler, arg);
+}
+// Presence, messages, attachments and friend requests go through the PSN servers.
+s32 basic_online(const char* fn) {
+  if (!np_init()) return SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
+  return offline(fn, SCE_NP_BASIC_ERROR_NOT_CONNECTED);
+}
+s32 sceNpBasicSetPresence(u32 data, u32 size) { return basic_online("sceNpBasicSetPresence"); }
+s32 sceNpBasicSendMessage(u32 to, u32 data, u32 size) { return basic_online("sceNpBasicSendMessage"); }
+s32 sceNpBasicSendMessageAttachment(ppu::Ctx&) { return basic_online("sceNpBasicSendMessageAttachment"); }
+s32 sceNpBasicAddFriend(u32 contact, u32 body, u32 container) { return basic_online("sceNpBasicAddFriend"); }
+// Received attachments are only selectable from system messages, which never arrive offline.
+s32 sceNpBasicRecvMessageAttachment(u32 container) { return basic_online("sceNpBasicRecvMessageAttachment"); }
+s32 sceNpBasicRecvMessageAttachmentLoad(u32 id, u32 buffer, u32 size) {
+  std::lock_guard lk(g_mu);
+  if (!g_init) return SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
+  if (!g_basic_handler) return SCE_NP_BASIC_ERROR_NOT_REGISTERED;
+  if (!buffer || !size) return SCE_NP_BASIC_ERROR_INVALID_ARGUMENT;
+  return SCE_NP_BASIC_ERROR_INVALID_DATA_ID;
+}
 s32 sceNpBasicUnregisterHandler() {
   std::lock_guard lk(g_mu);
   if (!g_init) return SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
@@ -262,6 +285,21 @@ s32 score_request(const char* fn) {
   return offline(fn, SCE_NP_COMMUNITY_ERROR_NO_LOGIN);
 }
 s32 sceNpScoreGetGameData(ppu::Ctx&) { return score_request("sceNpScoreGetGameData"); }
+s32 sceNpScoreGetGameDataAsync(ppu::Ctx&) { return score_request("sceNpScoreGetGameDataAsync"); }
+s32 sceNpScoreGetRankingByNpIdAsync(ppu::Ctx&) { return score_request("sceNpScoreGetRankingByNpIdAsync"); }
+s32 sceNpScoreGetRankingByRangeAsync(ppu::Ctx&) { return score_request("sceNpScoreGetRankingByRangeAsync"); }
+s32 sceNpScoreRecordGameDataAsync(ppu::Ctx&) { return score_request("sceNpScoreRecordGameDataAsync"); }
+s32 sceNpScoreRecordScoreAsync(ppu::Ctx&) { return score_request("sceNpScoreRecordScoreAsync"); }
+s32 sceNpScoreGetBoardInfo(ppu::Ctx&) { return score_request("sceNpScoreGetBoardInfo"); }
+s32 sceNpScoreGetBoardInfoAsync(ppu::Ctx&) { return score_request("sceNpScoreGetBoardInfoAsync"); }
+// Transactions cannot be created offline, so no id is ever valid.
+s32 score_trans_query(s32 id) {
+  std::lock_guard lk(g_mu);
+  if (!g_score_init) return SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED;
+  return g_score_trans_ctx.count(id) ? CELL_OK : SCE_NP_COMMUNITY_ERROR_INVALID_ID;
+}
+s32 sceNpScoreWaitAsync(s32 id, u32 result) { return score_trans_query(id); }
+s32 sceNpScorePollAsync(s32 id, u32 result) { return score_trans_query(id); }
 s32 sceNpScoreGetRankingByNpId(ppu::Ctx&) { return score_request("sceNpScoreGetRankingByNpId"); }
 s32 sceNpScoreGetRankingByRange(ppu::Ctx&) { return score_request("sceNpScoreGetRankingByRange"); }
 s32 sceNpScoreRecordGameData(ppu::Ctx&) { return score_request("sceNpScoreRecordGameData"); }
@@ -297,6 +335,7 @@ NP_MATCHING_REQ(sceNpMatchingAcceptInvitationGUI)
 NP_MATCHING_REQ(sceNpMatchingCreateRoomGUI)
 NP_MATCHING_REQ(sceNpMatchingGetResult)
 NP_MATCHING_REQ(sceNpMatchingGetResultGUI)
+NP_MATCHING_REQ(sceNpMatchingGetRoomInfo)
 NP_MATCHING_REQ(sceNpMatchingGetRoomListLimitGUI)
 NP_MATCHING_REQ(sceNpMatchingGrantOwnership)
 NP_MATCHING_REQ(sceNpMatchingJoinRoomGUI)
@@ -333,18 +372,26 @@ s32 signaling_conn(const char* fn, u32 ctx_id) {
   return offline(fn, SCE_NP_SIGNALING_ERROR_CONN_NOT_FOUND);
 }
 s32 sceNpSignalingActivateConnection(u32 ctx_id) { return signaling_conn("sceNpSignalingActivateConnection", ctx_id); }
+s32 sceNpSignalingDeactivateConnection(u32 ctx_id) { return signaling_conn("sceNpSignalingDeactivateConnection", ctx_id); }
 s32 sceNpSignalingGetConnectionStatus(u32 ctx_id) { return signaling_conn("sceNpSignalingGetConnectionStatus", ctx_id); }
 s32 sceNpSignalingTerminateConnection(u32 ctx_id) { return signaling_conn("sceNpSignalingTerminateConnection", ctx_id); }
 
 }  // namespace
 
 static hle::Module s_module("sceNp", {
+    HLE_FN(sceNpBasicAddFriend),
     HLE_FN(sceNpBasicAddPlayersHistory),
     HLE_FN(sceNpBasicGetEvent),
     HLE_FN(sceNpBasicGetFriendListEntry),
     HLE_FN(sceNpBasicGetFriendListEntryCount),
     HLE_FN(sceNpBasicGetMatchingInvitationEntryCount),
+    HLE_FN(sceNpBasicRecvMessageAttachment),
+    HLE_FN(sceNpBasicRecvMessageAttachmentLoad),
     HLE_FN(sceNpBasicRegisterContextSensitiveHandler),
+    HLE_FN(sceNpBasicRegisterHandler),
+    HLE_FN(sceNpBasicSendMessage),
+    HLE_FN(sceNpBasicSendMessageAttachment),
+    HLE_FN(sceNpBasicSetPresence),
     HLE_FN(sceNpBasicUnregisterHandler),
     HLE_FN(sceNpInit),
     HLE_FN(sceNpManagerGetAvatarUrl),
@@ -362,6 +409,7 @@ static hle::Module s_module("sceNp", {
     HLE_FN(sceNpMatchingDestroyCtx),
     HLE_FN(sceNpMatchingGetResult),
     HLE_FN(sceNpMatchingGetResultGUI),
+    HLE_FN(sceNpMatchingGetRoomInfo),
     HLE_FN(sceNpMatchingGetRoomListLimitGUI),
     HLE_FN(sceNpMatchingGrantOwnership),
     HLE_FN(sceNpMatchingJoinRoomGUI),
@@ -376,7 +424,16 @@ static hle::Module s_module("sceNp", {
     HLE_FN(sceNpScoreCreateTransactionCtx),
     HLE_FN(sceNpScoreDestroyTitleCtx),
     HLE_FN(sceNpScoreDestroyTransactionCtx),
+    HLE_FN(sceNpScoreGetBoardInfo),
+    HLE_FN(sceNpScoreGetBoardInfoAsync),
     HLE_FN(sceNpScoreGetGameData),
+    HLE_FN(sceNpScoreGetGameDataAsync),
+    HLE_FN(sceNpScoreGetRankingByNpIdAsync),
+    HLE_FN(sceNpScoreGetRankingByRangeAsync),
+    HLE_FN(sceNpScorePollAsync),
+    HLE_FN(sceNpScoreRecordGameDataAsync),
+    HLE_FN(sceNpScoreRecordScoreAsync),
+    HLE_FN(sceNpScoreWaitAsync),
     HLE_FN(sceNpScoreGetRankingByNpId),
     HLE_FN(sceNpScoreGetRankingByRange),
     HLE_FN(sceNpScoreInit),
@@ -385,6 +442,7 @@ static hle::Module s_module("sceNp", {
     HLE_FN(sceNpScoreTerm),
     HLE_FN(sceNpSignalingActivateConnection),
     HLE_FN(sceNpSignalingCreateCtx),
+    HLE_FN(sceNpSignalingDeactivateConnection),
     HLE_FN(sceNpSignalingDestroyCtx),
     HLE_FN(sceNpSignalingGetConnectionStatus),
     HLE_FN(sceNpSignalingTerminateConnection),

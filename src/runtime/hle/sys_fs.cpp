@@ -1,4 +1,5 @@
-// HLE: sys_fs (cellFs*) and LV2 file syscalls 801-834, both on top of rt::vfs.
+﻿// HLE: sys_fs (cellFs*) and LV2 file syscalls 801-834, both on top of rt::vfs.
+#include <atomic>
 #include <deque>
 
 #include "runtime/hle.h"
@@ -185,6 +186,19 @@ s32 cellFsFGetBlockSize(u32 fd, Ptr<be64> sector, Ptr<be64> block) {
   if (block) *block = bs;
   return CELL_OK;
 }
+// Stream reads (cellFsStRead*). The title imports only StRead/StReadStop/StReadFinish, not
+// StReadInit/StReadStart, so no file can have a stream: every call reports the stream as not
+// initialized (CELL_FS_ENXIO) for a valid descriptor, as the library does.
+s32 stream_not_initialized(const char* fn, u32 fd) {
+  vfs::Stat st;
+  if (s32 r = vfs::fstat(fd, &st); r != CELL_OK) return r;
+  static std::atomic<int> logged{0};
+  if (logged++ < 4) LOG_W("fs", "%s(fd %u): no stream was initialized (CELL_FS_ENXIO)", fn, fd);
+  return CELL_ENXIO;
+}
+s32 cellFsStRead(u32 fd, u32 buf, u64 size, u32 rsize) { return stream_not_initialized("cellFsStRead", fd); }
+s32 cellFsStReadStop(u32 fd) { return stream_not_initialized("cellFsStReadStop", fd); }
+s32 cellFsStReadFinish(u32 fd) { return stream_not_initialized("cellFsStReadFinish", fd); }
 
 // ---- LV2 syscalls ----
 s32 sys_fs_open(u32 path, s32 flags, Ptr<be32> fd, s32 mode, u32 arg, u64 size) { return cellFsOpen(path, flags, fd, arg, size); }
@@ -258,6 +272,9 @@ static hle::Module s_module("sys_fs", {
     HLE_FN(cellFsRename),
     HLE_FN(cellFsRmdir),
     HLE_FN(cellFsStat),
+    HLE_FN(cellFsStRead),
+    HLE_FN(cellFsStReadFinish),
+    HLE_FN(cellFsStReadStop),
     HLE_FN(cellFsUnlink),
     HLE_FN(cellFsWrite),
 });

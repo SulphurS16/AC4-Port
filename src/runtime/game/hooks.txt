@@ -1,13 +1,4 @@
 # Guest functions routed through runtime hooks (implementations in this directory).
-# Addresses are in BLUS30187 (disc 01.01, APP_VER 01.00 with the 01.35 update applied).
+# Addresses are in BLUS30027 (Armored Core 4, disc 01.01).
 # Read by ac4-recomp emit --hooks; a hooked f_<addr> calls ppu::hook_<name>(ctx, original).
-0x00ef9078 ms_stream_dtor          # MultiStream stream destructor
-0x00ef8ea8 ms_stream_dtor_delete   # its deleting variant (an inlined copy of the same body)
-0x00e4ee08 pad_update              # pad object update: cellPadGetData, sticks normalized at +1484
-0x00e4e860 pad_update_b            # second pad class: port at +372, sticks normalized at +1160
-0x00efa5d8 snd_bank_find           # sound bank Find (vtable slot 6): name -> cue
-0x00ef9ff0 ms_bank_remove          # sound bank removal
-0x0070b610 input_axis_get          # turn command getter: out = clamp(input's state +36)
-0x0070b548 input_pitch_set         # look (pitch) command setter thunk (view slot 9 -> 0x70e960)
-0x007a2fb8 look_update             # an AC's look control: turn (0x7a2940), then pitch (0x7a22d0)
-0x0070eb30 input_turn_set          # turn command setter (r3 input, f1 value)
+# Format: <address> <name>   # comment

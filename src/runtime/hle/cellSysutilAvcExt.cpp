@@ -58,6 +58,17 @@ s32 cellSysutilAvcSetAttribute(u32 attr_id, u32 param) {
   g_attributes[attr_id] = ppu::r32(param);
   return CELL_OK;
 }
+// The basic (SDK 1.x) loader: the utility cannot be loaded offline either.
+s32 cellSysutilAvcLoadAsync(u32 func, u32 userdata, u32 container, u32 media, u32 video_quality, u32 voice_quality,
+                            u32 request_id) {
+  if (!func || !request_id) return CELL_AVC_ERROR_INVALID_ARGUMENT;
+  return unavailable("cellSysutilAvcLoadAsync");
+}
+// Settings of a loaded utility: none is ever loaded.
+s32 cellSysutilAvcSetLayoutMode(u32 layout) { return CELL_AVC_ERROR_NOT_INITIALIZED; }
+s32 cellSysutilAvcSetVoiceMuting(u32 muting) { return CELL_AVC_ERROR_NOT_INITIALIZED; }
+s32 cellSysutilAvcSetVideoMuting(u32 muting) { return CELL_AVC_ERROR_NOT_INITIALIZED; }
+s32 cellSysutilAvcSetSpeakerVolumeLevel(s32 level) { return CELL_AVC_ERROR_NOT_INITIALIZED; }
 s32 cellSysutilAvcJoinRequest(u32 room_id, u32 request_id) { return CELL_AVC_ERROR_NOT_INITIALIZED; }
 s32 cellSysutilAvcByeRequest(u32 request_id) { return CELL_AVC_ERROR_NOT_INITIALIZED; }
 s32 cellSysutilAvcUnloadAsync(u32 request_id) { return CELL_AVC_ERROR_NOT_INITIALIZED; }
@@ -75,7 +86,12 @@ static hle::Module s_module("cellSysutilAvcExt", {
 static hle::Module s_sysutil_avc("cellSysutil", {
     HLE_FN(cellSysutilAvcByeRequest),
     HLE_FN(cellSysutilAvcJoinRequest),
+    HLE_FN(cellSysutilAvcLoadAsync),
     HLE_FN(cellSysutilAvcSetAttribute),
+    HLE_FN(cellSysutilAvcSetLayoutMode),
+    HLE_FN(cellSysutilAvcSetSpeakerVolumeLevel),
+    HLE_FN(cellSysutilAvcSetVideoMuting),
+    HLE_FN(cellSysutilAvcSetVoiceMuting),
     HLE_FN(cellSysutilAvcUnloadAsync),
 });
 

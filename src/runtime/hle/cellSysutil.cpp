@@ -10,6 +10,7 @@
 
 namespace rt {
 namespace game_data {
+void cellGameDataCheckCreate(ppu::Ctx& ctx);
 void cellGameDataCheckCreate2(ppu::Ctx& ctx);
 void cellHddGameCheck(ppu::Ctx& ctx);
 void cellSysCacheMount(ppu::Ctx& ctx);
@@ -21,6 +22,13 @@ void cellSaveDataFixedLoad2(ppu::Ctx& ctx);
 void cellSaveDataFixedSave2(ppu::Ctx& ctx);
 void cellSaveDataListLoad2(ppu::Ctx& ctx);
 void cellSaveDataListSave2(ppu::Ctx& ctx);
+void cellSaveDataAutoLoad(ppu::Ctx& ctx);
+void cellSaveDataAutoSave(ppu::Ctx& ctx);
+void cellSaveDataDelete(ppu::Ctx& ctx);
+void cellSaveDataFixedLoad(ppu::Ctx& ctx);
+void cellSaveDataFixedSave(ppu::Ctx& ctx);
+void cellSaveDataListLoad(ppu::Ctx& ctx);
+void cellSaveDataListSave(ppu::Ctx& ctx);
 }  // namespace save_data
 namespace {
 
@@ -239,12 +247,20 @@ static hle::Module s_module("cellSysutil", {
     HLE_FN(cellAudioOutGetSoundAvailability),
     HLE_FN(cellAudioOutGetState),
     HLE_FN(cellAudioOutSetCopyControl),
+    HLE_RAW(game_data::cellGameDataCheckCreate),
     HLE_RAW(game_data::cellGameDataCheckCreate2),
     HLE_RAW(game_data::cellHddGameCheck),
     // cellOskDialog*: osk_dialog.cpp
     HLE_RAW(save_data::cellSaveDataAutoLoad2),
     HLE_RAW(save_data::cellSaveDataAutoSave2),
     HLE_TODO(cellSaveDataDelete2),
+    HLE_RAW(save_data::cellSaveDataAutoLoad),
+    HLE_RAW(save_data::cellSaveDataAutoSave),
+    HLE_RAW(save_data::cellSaveDataDelete),
+    HLE_RAW(save_data::cellSaveDataFixedLoad),
+    HLE_RAW(save_data::cellSaveDataFixedSave),
+    HLE_RAW(save_data::cellSaveDataListLoad),
+    HLE_RAW(save_data::cellSaveDataListSave),
     HLE_RAW(save_data::cellSaveDataFixedLoad2),
     HLE_RAW(save_data::cellSaveDataFixedSave2),
     HLE_RAW(save_data::cellSaveDataListLoad2),

@@ -5,6 +5,9 @@ param(
   [string]$Target = "",
   [switch]$Clean
 )
+# CMake reports regenerations ("GLOB mismatch!") on stderr: never treat that as a failure here
+# (callers may run with $ErrorActionPreference = "Stop"); the exit code decides.
+$ErrorActionPreference = "Continue"
 . (Join-Path $PSScriptRoot "env.ps1")
 $root = Split-Path -Parent $PSScriptRoot
 $bdir = Join-Path $root ("local\build\" + $Config.ToLower())

@@ -18,6 +18,7 @@
 
 #include "common/file.h"
 #include "common/sfo.h"
+#include "runtime/config.h"
 #include "runtime/hle.h"
 #include "runtime/sysdialog.h"
 #include "runtime/vfs.h"
@@ -273,35 +274,13 @@ struct Session {
   }
 
   // Protected (secure) files are listed in PARAM.SFO the way RPCS3 does it, so saves move
-  // between the two: an integer "*<file name>" per file, 1 if protected. Saves written by earlier
-  // versions of this runtime keep the list in AC4_SECURE_FILES; it is still read and is migrated
-  // file by file as files are written.
+  // between the two: an integer "*<file name>" per file, 1 if protected.
   bool secure(const std::string& name) const {
-    if (sfo.count("*" + name)) return ac4::sfo::get_int(sfo, "*" + name) != 0;
-    std::string list = "/" + ac4::sfo::get_string(sfo, "AC4_SECURE_FILES") + "/";
-    return list.find("/" + name + "/") != std::string::npos;
+    return sfo.count("*" + name) && ac4::sfo::get_int(sfo, "*" + name) != 0;
   }
-  void set_secure(const std::string& name, bool on) {
-    auto legacy = sfo.find("AC4_SECURE_FILES");
-    if (legacy != sfo.end()) {  // migrate: the remaining protected files get their own entries
-      std::string list = ac4::sfo::get_string(sfo, "AC4_SECURE_FILES");
-      sfo.erase(legacy);
-      for (size_t p = 0; p < list.size();) {
-        size_t q = list.find('/', p);
-        std::string n = list.substr(p, q == std::string::npos ? std::string::npos : q - p);
-        if (!n.empty() && !sfo.count("*" + n)) ac4::sfo::set_int(sfo, "*" + n, 1);
-        if (q == std::string::npos) break;
-        p = q + 1;
-      }
-    }
-    ac4::sfo::set_int(sfo, "*" + name, on ? 1 : 0);
-  }
-  void forget_file(const std::string& name) {
-    set_secure(name, false);
-    sfo.erase("*" + name);
-  }
+  void set_secure(const std::string& name, bool on) { ac4::sfo::set_int(sfo, "*" + name, on ? 1 : 0); }
+  void forget_file(const std::string& name) { sfo.erase("*" + name); }
   void forget_all_files() {
-    sfo.erase("AC4_SECURE_FILES");
     for (auto it = sfo.begin(); it != sfo.end();) it = it->first.size() > 1 && it->first[0] == '*' ? sfo.erase(it) : std::next(it);
   }
 
@@ -699,8 +678,9 @@ s32 run(ppu::Ctx& ctx, const Args& a) {
 }  // namespace
 
 namespace {
-// List/Fixed: (version, setList, setBuf, funcList|funcFixed, funcStat, funcFile, container, userdata)
-void list_or_fixed(ppu::Ctx& ctx, Op op) {
+// List/Fixed: (version, setList, setBuf, funcList|funcFixed, funcStat, funcFile, container, userdata);
+// the SDK 1.x forms (no "2") take the same arguments without userdata.
+void list_or_fixed(ppu::Ctx& ctx, Op op, bool has_userdata = true) {
   Args a;
   a.op = op;
   a.version = u32(ctx.r[3]);
@@ -709,11 +689,12 @@ void list_or_fixed(ppu::Ctx& ctx, Op op) {
   (op == Op::ListSave || op == Op::ListLoad ? a.func_list : a.func_fixed) = u32(ctx.r[6]);
   a.func_stat = u32(ctx.r[7]);
   a.func_file = u32(ctx.r[8]);
-  a.userdata = u32(ctx.r[10]);
+  a.userdata = has_userdata ? u32(ctx.r[10]) : 0;
   ctx.r[3] = u64(s64(run(ctx, a)));
 }
-// Auto: (version, dirName, errDialog, setBuf, funcStat, funcFile, container, userdata)
-void automatic(ppu::Ctx& ctx, Op op) {
+// Auto: (version, dirName, errDialog, setBuf, funcStat, funcFile, container, userdata); the SDK 1.x
+// forms take the same arguments without userdata.
+void automatic(ppu::Ctx& ctx, Op op, bool has_userdata = true) {
   Args a;
   a.op = op;
   a.version = u32(ctx.r[3]);
@@ -722,7 +703,7 @@ void automatic(ppu::Ctx& ctx, Op op) {
   a.set_buf = u32(ctx.r[6]);
   a.func_stat = u32(ctx.r[7]);
   a.func_file = u32(ctx.r[8]);
-  a.userdata = u32(ctx.r[10]);
+  a.userdata = has_userdata ? u32(ctx.r[10]) : 0;
   ctx.r[3] = u64(s64(run(ctx, a)));
 }
 }  // namespace
@@ -733,5 +714,46 @@ void cellSaveDataFixedSave2(ppu::Ctx& ctx) { list_or_fixed(ctx, Op::FixedSave); 
 void cellSaveDataFixedLoad2(ppu::Ctx& ctx) { list_or_fixed(ctx, Op::FixedLoad); }
 void cellSaveDataAutoSave2(ppu::Ctx& ctx) { automatic(ctx, Op::AutoSave); }
 void cellSaveDataAutoLoad2(ppu::Ctx& ctx) { automatic(ctx, Op::AutoLoad); }
+void cellSaveDataListSave(ppu::Ctx& ctx) { list_or_fixed(ctx, Op::ListSave, false); }
+void cellSaveDataListLoad(ppu::Ctx& ctx) { list_or_fixed(ctx, Op::ListLoad, false); }
+void cellSaveDataFixedSave(ppu::Ctx& ctx) { list_or_fixed(ctx, Op::FixedSave, false); }
+void cellSaveDataFixedLoad(ppu::Ctx& ctx) { list_or_fixed(ctx, Op::FixedLoad, false); }
+void cellSaveDataAutoSave(ppu::Ctx& ctx) { automatic(ctx, Op::AutoSave, false); }
+void cellSaveDataAutoLoad(ppu::Ctx& ctx) { automatic(ctx, Op::AutoLoad, false); }
+
+// cellSaveDataDelete(container): the system's delete utility for this title's saves: the user picks
+// a save, confirms, it is deleted; repeated until the user backs out (CELL_SAVEDATA_RET_CANCEL).
+void cellSaveDataDelete(ppu::Ctx& ctx) {
+  std::unique_lock busy(g_busy, std::try_to_lock);
+  if (!busy) {
+    ctx.r[3] = u64(s64(SAVEDATA_ERROR_BUSY));
+    return;
+  }
+  fs::path root = savedata_root();
+  int focus = 0;
+  for (;;) {
+    std::vector<Entry> entries = enumerate(root, cfg().title_id);
+    sort_entries(entries, 0, 0);
+    if (entries.empty()) {
+      sysdlg::message("There is no saved data.");
+      break;
+    }
+    std::vector<sysdlg::ListItem> items;
+    for (const Entry& e : entries) items.push_back({e.title, e.subtitle, e.detail, e.mtime, false});
+    int pick = sysdlg::choose("Delete", items, std::clamp(focus, 0, int(items.size()) - 1));
+    if (pick < 0) break;
+    focus = pick;
+    const Entry& e = entries[pick];
+    if (!sysdlg::confirm("Do you want to delete this saved data?\n\n" + e.title + "\n" + e.subtitle)) continue;
+    std::error_code ec;
+    fs::path dir = root / e.dir;
+    ac4::guard_write(dir);
+    fs::remove_all(dir, ec);
+    LOG_I("savedata", "cellSaveDataDelete: deleted %s%s", e.dir.c_str(), ec ? (" (error: " + ec.message() + ")").c_str() : "");
+    sysdlg::message(ec ? "The saved data could not be deleted." : "The saved data was deleted.");
+  }
+  LOG_I("savedata", "cellSaveDataDelete: closed");
+  ctx.r[3] = u64(s64(RET_CANCEL));
+}
 
 }  // namespace rt::save_data

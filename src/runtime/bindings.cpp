@@ -64,7 +64,7 @@ const KeyName kKeys[] = {
     {"WheelUp", kWheelUp},   {"WheelDown", kWheelDown},
 };
 
-const char* const kDefault = R"(# ARMORED CORE for Answer (native port): keyboard and mouse bindings for pad port 0.
+const char* const kDefault = R"(# Armored Core 4 (native port): keyboard and mouse bindings for pad port 0.
 # Each line binds a pad control to one or more inputs: <control> = <input>[, <input>...]
 # Controls: cross circle square triangle l1 l2 l3 r1 r2 r3 start select up down left right
 #           lstick_up lstick_down lstick_left lstick_right rstick_up rstick_down rstick_left rstick_right
@@ -72,7 +72,8 @@ const char* const kDefault = R"(# ARMORED CORE for Answer (native port): keyboar
 #         Left, Right, Home, End, PageUp, PageDown, Insert, Delete, CapsLock, Mouse1 (left), Mouse2
 #         (right), Mouse3 (middle), Mouse4, Mouse5, WheelUp, WheelDown
 # Mouse buttons and the wheel count only while the window has captured the mouse (click into it;
-# F1 or switching away releases it). The default follows the game's SIMPLE key layout.
+# F1 or switching away releases it). PROVISIONAL default: the button roles in the comments below
+# come from the ACFA port and still have to be checked against Armored Core 4's own controls.
 
 # Movement (left stick) and view (right stick; the mouse is the main way to look)
 lstick_up = W

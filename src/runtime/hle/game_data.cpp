@@ -1,4 +1,4 @@
-// HLE (cellSysutil): cellGameDataCheckCreate2, cellHddGameCheck, cellSysCacheMount.
+// HLE (cellSysutil): cellGameDataCheckCreate(2), cellHddGameCheck, cellSysCacheMount.
 // Game data lives under /dev_hdd0/game/<dir> (project-owned local/hdd0); the system cache is
 // /dev_hdd1 (local/hdd1), cleared when a different cache id is mounted.
 #include <filesystem>
@@ -54,8 +54,18 @@ void apply_param(ac4::sfo::Map& sfo, u32 p) {
   }
 }
 
-// Shared implementation; `hdd` selects the cellHddGameCheck variant (category HG).
-s32 check_create(ppu::Ctx& ctx, u32 version, u32 dir_name, u32 func_stat, bool hdd) {
+// Size of a directory tree in KiB (rounded up per file).
+u32 tree_kb(const fs::path& p) {
+  u64 kb = 0;
+  std::error_code ec;
+  for (const auto& e : fs::recursive_directory_iterator(p, ec))
+    if (e.is_regular_file(ec)) kb += (e.file_size(ec) + 1023) / 1024;
+  return u32(std::min<u64>(kb, 0x7fffffff));
+}
+
+// Shared implementation; `hdd` selects the cellHddGameCheck variant (category HG). The SDK 1.x
+// cellGameDataCheckCreate always reports the data's size (`calc_size`); the "2" form does not.
+s32 check_create(ppu::Ctx& ctx, u32 version, u32 dir_name, u32 func_stat, bool hdd, bool calc_size = false) {
   const s32 E_PARAM = hdd ? HDDGAME_ERROR_PARAM : GAMEDATA_ERROR_PARAM, E_BROKEN = hdd ? HDDGAME_ERROR_BROKEN : GAMEDATA_ERROR_BROKEN,
             E_ACCESS = hdd ? HDDGAME_ERROR_ACCESS : GAMEDATA_ERROR_ACCESS, E_CB = hdd ? HDDGAME_ERROR_CBRESULT : GAMEDATA_ERROR_CBRESULT;
   if (!func_stat || !dir_name) return E_PARAM;
@@ -85,9 +95,9 @@ s32 check_create(ppu::Ctx& ctx, u32 version, u32 dir_name, u32 func_stat, bool h
   write_cstr(get + G_INFO_PATH, dir, 1055);
   write_cstr(get + G_DATA_PATH, usrdir, 1055);
   fill_param(get + G_PARAM, sfo);
-  ppu::w32(get + G_SIZEKB, u32(-1));  // CELL_GAMEDATA_SIZEKB_NOTCALC
+  ppu::w32(get + G_SIZEKB, calc_size ? (is_new ? 0 : tree_kb(host_dir)) : u32(-1));  // -1: CELL_GAMEDATA_SIZEKB_NOTCALC
   ppu::w32(get + G_SYSSIZEKB, 0);
-  LOG_I("gamedata", "%s('%s'): %s data", hdd ? "cellHddGameCheck" : "cellGameDataCheckCreate2", name.c_str(),
+  LOG_I("gamedata", "%s('%s'): %s data", hdd ? "cellHddGameCheck" : calc_size ? "cellGameDataCheckCreate" : "cellGameDataCheckCreate2", name.c_str(),
         is_new ? "new" : "existing");
   hle::call_guest(ctx, func_stat, {result, get, set});
   s32 res = s32(ppu::r32(result));
@@ -116,6 +126,12 @@ s32 check_create(ppu::Ctx& ctx, u32 version, u32 dir_name, u32 func_stat, bool h
 void cellGameDataCheckCreate2(ppu::Ctx& ctx) {
   u32 version = u32(ctx.r[3]), dir = u32(ctx.r[4]), func = u32(ctx.r[6]);
   s32 r = version != 0 ? GAMEDATA_ERROR_PARAM : check_create(ctx, version, dir, func, false);
+  ctx.r[3] = u64(s64(r));
+}
+
+void cellGameDataCheckCreate(ppu::Ctx& ctx) {
+  u32 version = u32(ctx.r[3]), dir = u32(ctx.r[4]), func = u32(ctx.r[6]);
+  s32 r = version != 0 ? GAMEDATA_ERROR_PARAM : check_create(ctx, version, dir, func, false, true);
   ctx.r[3] = u64(s64(r));
 }
 
