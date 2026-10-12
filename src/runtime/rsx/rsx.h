@@ -50,7 +50,7 @@ u64 vblank_count();
 void start();
 // A movie frame was fetched for display (game hook on its cellSail graphics adapter wrapper). The
 // adapter picks frames by the flip times it is given (cellGcmGetLastFlipTime): while movies play,
-// flips keep the console's 59.94 Hz cadence even when a different frame limit is selected.
+// flips stay at about 60 per second whatever frame limit is selected.
 void note_movie_frame();
 
 // Blocks until the FIFO read pointer (io offset) is outside [lo, hi]: a command buffer segment the

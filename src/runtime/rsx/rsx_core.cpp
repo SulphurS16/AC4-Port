@@ -3,13 +3,17 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <deque>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 #include "runtime/config.h"
+#include "runtime/gpu/present.h"
+#include "runtime/log.h"
 #include "runtime/hle.h"
 #include "runtime/lv2/lv2.h"
 #include "runtime/memory.h"
@@ -122,8 +126,8 @@ inline void notify_get(u32 get) {
 }
 }  // namespace
 
-// --fps-limit N: flips at most N times per second, on an even schedule (a late frame does not
-// make the next ones early: the schedule restarts after a miss). Coarse waits sleep on a
+// Timed pacing (do_flip): flips at most N times per second, on an even schedule (a late frame does
+// not make the next ones early: the schedule restarts after a miss). Coarse waits sleep on a
 // high-resolution timer; the last fraction of a millisecond spins for precision.
 std::atomic<s64> g_movie_frame_qpc{0};
 void note_movie_frame() {
@@ -341,11 +345,113 @@ void set_vblank_handler(u32 opd) { g_vblank_handler = opd; }
 u64 vblank_count() { return g_vblank.load(); }
 
 // ---------------------------------------------------------------------------------------------
-// Flip: wait for vblank (vsync mode), hand the buffer to the presenter, update status, notify.
-// In hsync mode the hardware switches buffers at the next scanline; the display still shows at
-// most one new frame per refresh, and the RSX's rendering time kept the game far below that rate.
-// Without a model of rendering time, a second flip within the same refresh period waits for the
-// next vblank (otherwise the game would run its loop several times per displayed frame).
+// Flip: pacing (below), hand the buffer to the presenter, update status, notify.
+//
+// Pacing (config.h fps_limit, vsync):
+// - console: at most one flip per vertical blank of the emulated 59.94 Hz display. In hsync mode
+//   the hardware switches buffers at the next scanline, but the display still shows at most one
+//   new frame per refresh; without a model of rendering time, a second flip within the same
+//   refresh period waits for the next vblank (otherwise the game would run its loop several times
+//   per displayed frame).
+// - a rate N that divides the display's refresh rate (60 on a 60, 120 or 240 Hz display, 82.5 or
+//   55 on 165 Hz): locked to the display. Each frame is presented for refresh/N refreshes and the
+//   flip waits until the previous frame is on screen (present.h wait_present_ready), so every
+//   frame stays on screen equally long and the game runs at the display's real rate.
+// - any other rate: flips timed at N per second. Even on a variable-refresh display; a fixed
+//   refresh display shows some frames one refresh longer than others (e.g. 60 on 165 Hz).
+// - display: N = the display's refresh rate. Unlimited: no waiting, no vsync.
+// Movies keep about 60 flips per second: their frames are picked by flip time (at 120 the video
+// stayed black).
+namespace {
+enum class Pace { console, locked, timed, unlimited };
+struct Pacing {
+  Pace pace = Pace::console;
+  double rate = 0;   // flips per second (locked, timed)
+  u32 interval = 1;  // sync interval of the presents
+  double hz = 0;     // the display's refresh rate (0 unknown / headless)
+  bool movie = false;
+  bool operator==(const Pacing&) const = default;
+};
+
+Pacing choose_pacing() {
+  const Config& c = cfg();
+  Pacing p;
+  p.hz = gpu::display_refresh_hz();
+  double limit = c.fps_limit;
+  if (limit == kFpsDisplay) limit = p.hz > 0 ? p.hz : 60;
+  if (limit != kFpsConsole && std::fabs(limit - 60) > 0.1 && movie_playing()) {
+    limit = 60;
+    p.movie = true;
+  }
+  if (limit < 0) {
+    p.interval = c.vsync ? 1 : 0;
+    return p;
+  }
+  if (limit == 0) {
+    p.pace = Pace::unlimited;
+    p.interval = 0;
+    return p;
+  }
+  p.rate = limit;
+  if (c.vsync && p.hz > 0) {
+    double q = p.hz / limit;
+    long k = std::lround(q);
+    if (k >= 1 && k <= 4 && std::fabs(q - double(k)) <= 0.006 * double(k)) {
+      p.pace = Pace::locked;
+      p.interval = u32(k);
+      return p;
+    }
+  }
+  p.pace = Pace::timed;
+  p.interval = c.vsync ? 1 : 0;
+  return p;
+}
+
+void log_pacing(const Pacing& p) {
+  std::string what;
+  switch (p.pace) {
+    case Pace::console:
+      what = "the console's (one flip per emulated 59.94 Hz vblank)";
+      break;
+    case Pace::unlimited:
+      what = "unlimited (no vsync)";
+      break;
+    case Pace::locked:
+      what = ac4::strprintf("%.4g frames/s locked to the display (%.3f Hz, each frame %u refresh%s)", p.rate, p.hz, p.interval,
+                            p.interval > 1 ? "es" : "");
+      break;
+    case Pace::timed: {
+      std::string even;  // rates this display shows evenly
+      for (u32 k = 1; k <= 4 && p.hz > 0; ++k)
+        if (p.hz / k >= 29) even += ac4::strprintf("%s%.4g", even.empty() ? "" : ", ", p.hz / k);
+      what = ac4::strprintf("%.4g frames/s timed (display %.3f Hz%s%s)", p.rate, p.hz,
+                            even.empty() ? "" : "; frames stay on screen evenly on a variable-refresh display, or here at ",
+                            even.c_str());
+      break;
+    }
+  }
+  LOG_I("rsx", "pacing: %s%s%s", what.c_str(), p.pace != Pace::unlimited && !cfg().vsync ? ", vsync off" : "",
+        p.movie ? " (movie)" : "");
+}
+
+// Waits until the display takes the next frame. After a timeout (window minimized or covered:
+// presents may not complete) flips are timed instead for a second.
+bool display_wait(const Pacing& p) {
+  static double fallback_until = 0;
+  static int logged = 0;
+  double now = log_time();
+  if (now < fallback_until) return false;
+  u32 timeout = u32(std::clamp(4000.0 / p.rate, 20.0, 200.0));  // about four frames
+  if (gpu::wait_present_ready(timeout)) return true;
+  fallback_until = now + 1.0;
+  if (logged < 20) {
+    ++logged;
+    LOG_I("rsx", "pacing: the display took no frame for %u ms (window minimized or covered?); flips timed for 1 s", timeout);
+  }
+  return false;
+}
+}  // namespace
+
 void do_flip(u32 id) {
   if (double ms = cfg().present_delay_ms; ms > 0) {  // diagnostics: a slow GPU, i.e. a low frame rate
     if (static bool logged = false; !logged) {
@@ -354,24 +460,32 @@ void do_flip(u32 id) {
     }
     lv2::sleep_us(u64(ms * 1000));
   }
-  double limit = cfg().fps_limit;
-  if (limit >= 0 && movie_playing()) {
-    static bool logged = false;
-    if (!logged) {
-      logged = true;
-      LOG_I("rsx", "frame limit: movies keep the console's 59.94 Hz flip cadence (their frames are picked by flip time)");
-    }
-    limit = -1;
+  static Pacing last;
+  static bool have_last = false;
+  Pacing p = choose_pacing();
+  if (!have_last || !(p == last)) {
+    log_pacing(p);
+    last = p;
+    have_last = true;
   }
-  if (limit < 0) {
-    // The console's pacing: at most one flip per vertical blank of the emulated 59.94 Hz display.
-    if (g_flip_mode.load() == 1 || g_flip_vblank == g_vblank.load()) {
-      std::unique_lock lk(g_vb_mu);
-      u64 v = g_vblank.load();
-      g_vb_cv.wait_for(lk, std::chrono::milliseconds(50), [&] { return g_vblank.load() != v; });
-    }
-  } else if (limit > 0) {
-    pace_flip(limit);
+  gpu::set_present_interval(p.interval);
+  switch (p.pace) {
+    case Pace::console:
+      if (g_flip_mode.load() == 1 || g_flip_vblank == g_vblank.load()) {
+        std::unique_lock lk(g_vb_mu);
+        u64 v = g_vblank.load();
+        g_vb_cv.wait_for(lk, std::chrono::milliseconds(50), [&] { return g_vblank.load() != v; });
+      }
+      break;
+    case Pace::locked:
+      if (!display_wait(p)) pace_flip(p.rate);
+      break;
+    case Pace::timed:
+      pace_flip(p.rate);
+      if (p.interval && p.hz > 0) display_wait(p);  // never more than one frame queued for the display
+      break;
+    case Pace::unlimited:
+      break;
   }
   g_flip_vblank = g_vblank.load();
   DisplayBuffer b;

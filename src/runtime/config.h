@@ -1,8 +1,13 @@
 // Runtime configuration (command line). Paths are host paths.
 #pragma once
+#include <cstdlib>
 #include <string>
 
 namespace rt {
+
+// Frame limit values besides a rate (Config::fps_limit).
+constexpr double kFpsConsole = -1;  // the console's pacing: one flip per emulated 59.94 Hz vblank
+constexpr double kFpsDisplay = -2;  // the display's refresh rate
 
 struct Config {
   std::string disc_root;    // read-only PS3 disc folder (contains PS3_GAME)
@@ -44,12 +49,28 @@ struct Config {
   std::string priority;             // process priority class: "" (normal), "above-normal", "high"
   int gpu_timing = 0;               // GPU time per pass (gpu/gpu_timing.h), logged every 5 s; 2: per draw
   double present_delay_ms = 0;      // diagnostics: extra time per flip (emulates a slow GPU / low frame rate)
-  double fps_limit = -1;            // frame limit: < 0 the console's pacing (one flip per 59.94 Hz vblank),
-                                    // > 0 flips paced at this rate, 0 unlimited
+  double fps_limit = 60;            // frame limit (rsx do_flip): frames per second, 0 unlimited, kFpsConsole,
+                                    // kFpsDisplay; locked to the display when the rate divides its refresh
+  bool vsync = true;                // presents wait for the display's refresh (no tearing); off: lowest latency
+  bool fullscreen = false;          // start in borderless fullscreen (F11 / Alt+Enter toggle)
   std::string spu_cache;            // where collected SPU code records are written
   std::string shader_cache;         // compiled HLSL (derived from the game's shaders; machine-local)
 };
 
 Config& cfg();
+
+// "console", "display", "unlimited" or frames per second (0 = unlimited); false if not one of these.
+inline bool parse_fps_limit(const std::string& s, double* out) {
+  if (s == "console") *out = kFpsConsole;
+  else if (s == "display") *out = kFpsDisplay;
+  else if (s == "unlimited" || s == "off") *out = 0;
+  else {
+    char* end = nullptr;
+    double v = std::strtod(s.c_str(), &end);
+    if (s.empty() || *end || v < 0 || v > 1000) return false;
+    *out = v;
+  }
+  return true;
+}
 
 }  // namespace rt

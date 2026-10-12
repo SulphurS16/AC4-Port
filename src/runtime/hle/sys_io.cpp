@@ -23,6 +23,8 @@
 #include "runtime/datawatch.h"
 #include "runtime/game/game_input.h"
 #include "runtime/gpu/input_hooks.h"
+#include "runtime/gpu/present.h"
+#include "runtime/gpu/window.h"
 #include "runtime/input.h"
 #include "runtime/memory.h"
 #include "runtime/memscan.h"
@@ -217,9 +219,30 @@ void control_thread(std::string path) {
         datawatch::command(line.substr(6));
         continue;
       }
-      if (line.rfind("fps ", 0) == 0) {  // "fps N": frame limit (config.h fps_limit; -1 console pacing, 0 unlimited)
-        cfg().fps_limit = std::atof(line.c_str() + 4);
-        LOG_I("pad", "control: frame limit %g", cfg().fps_limit);
+      if (line.rfind("fps ", 0) == 0) {  // "fps N|console|display|unlimited": frame limit (config.h)
+        if (!parse_fps_limit(line.substr(4), &cfg().fps_limit)) LOG_W("pad", "control: '%s': not a frame limit", line.c_str());
+        continue;
+      }
+      if (line == "vsync on" || line == "vsync off") {
+        cfg().vsync = line == "vsync on";
+        continue;
+      }
+      if (line == "fullscreen on" || line == "fullscreen off") {  // tests: without taking the focus
+        gpu::window_set_fullscreen(line == "fullscreen on", false);
+        continue;
+      }
+      if (line == "shot output") {  // the window's output as presented (present.h)
+        gpu::request_output_capture();
+        continue;
+      }
+      if (line == "window minimize" || line == "window restore") {
+        gpu::window_set_minimized(line == "window minimize");
+        continue;
+      }
+      if (line.rfind("window ", 0) == 0) {  // "window WxH": client size (tests)
+        int w = 0, h = 0;
+        if (std::sscanf(line.c_str() + 7, "%dx%d", &w, &h) == 2 && w >= 160 && h >= 90) gpu::window_set_client_size(w, h);
+        else LOG_W("pad", "control: '%s' is not 'window WxH'", line.c_str());
         continue;
       }
       if (line.rfind("dialog ", 0) == 0) {  // answers for system dialogs (sysdialog.h)

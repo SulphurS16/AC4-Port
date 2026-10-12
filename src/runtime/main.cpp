@@ -102,7 +102,15 @@ int main(int argc, char** argv) {
     else if (a == "--priority") c.priority = next();
     else if (a == "--gpu-timing") c.gpu_timing = 1;
     else if (a == "--present-delay") c.present_delay_ms = std::atof(next().c_str());
-    else if (a == "--fps-limit") c.fps_limit = std::atof(next().c_str());
+    else if (a == "--fps-limit") {
+      std::string v = next();
+      if (!parse_fps_limit(v, &c.fps_limit)) {
+        std::fprintf(stderr, "--fps-limit %s: use frames per second, console, display or unlimited\n", v.c_str());
+        return 2;
+      }
+    }
+    else if (a == "--vsync") c.vsync = next() != "off";
+    else if (a == "--fullscreen") c.fullscreen = true;
     else if (a == "--gpu-timing-draws") c.gpu_timing = 2;
     else if (a == "--spu-cache") c.spu_cache = next();
     else if (a == "--shot-interval") c.shot_interval = std::atof(next().c_str());
@@ -191,6 +199,8 @@ int main(int argc, char** argv) {
   lv2_init();
   if (!c.headless && !gpu::window_create(c.title + " - native port", 1280, 720, true))
     LOG_E("main", "window creation failed; running without presentation");
+  else if (!c.headless && c.fullscreen)
+    gpu::window_set_fullscreen(true);
   start_main_thread(ex.entry_opd, ex.primary_stack, ex.primary_prio, ex.tls_vaddr, ex.tls_filesz, ex.tls_memsz,
                     ex.malloc_pagesize, "/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN");
   auto t0 = std::chrono::steady_clock::now();
