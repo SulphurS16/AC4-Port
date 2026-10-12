@@ -48,7 +48,6 @@ void gcm_callback(ppu::Ctx& ctx) {
   Ptr<ContextData> c(u32(ctx.r[3]));
   u32 cur = c->current;
   auto* ctrl_put = reinterpret_cast<std::atomic<u32>*>(ppu::mem() + rsx::kControlAddr);
-  auto* ctrl_get = reinterpret_cast<std::atomic<u32>*>(ppu::mem() + rsx::kControlAddr + 4);
   ctrl_put->store(__builtin_bswap32(offset_of(cur)));
   u32 range = (cur - g_cmd_begin) / (32 * 1024);
   u32 nb, ne;
@@ -63,13 +62,8 @@ void gcm_callback(ppu::Ctx& ctx) {
   c->begin = nb;
   c->current = nb;
   c->end = ne;
-  // Wait until the RSX is outside the new fragment.
-  u32 lo = offset_of(nb), hi = offset_of(ne);
-  for (u32 spins = 0;; ++spins) {
-    u32 get = __builtin_bswap32(ctrl_get->load());
-    if (get < lo || get > hi) break;
-    if (spins > 64) Sleep(0);
-  }
+  // Wait until the RSX is outside the new fragment (a blocking wait woken by the FIFO thread).
+  rsx::wait_get_outside(offset_of(nb), offset_of(ne));
   ctx.r[3] = CELL_OK;
 }
 

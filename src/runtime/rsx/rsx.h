@@ -48,6 +48,9 @@ u64 vblank_count();
 
 // Starts the RSX command processor and vblank threads (called once by cellGcmInit).
 void start();
+// Blocks until the FIFO read pointer (io offset) is outside [lo, hi]: a command buffer segment the
+// game wants to reuse has been consumed. Woken by the FIFO thread; no spinning.
+void wait_get_outside(u32 lo, u32 hi);
 
 // Debug statistics.
 std::string stats();

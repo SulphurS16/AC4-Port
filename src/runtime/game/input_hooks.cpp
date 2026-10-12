@@ -176,8 +176,25 @@ void hook_view_pitch_set(Ctx& ctx, void (*orig)(Ctx&)) {
 void hook_look_update(Ctx& ctx, void (*orig)(Ctx&)) {
   u32 look = u32(ctx.r[3]), input = u32(ctx.r[4]);
   u32 state = g_player_state.load(std::memory_order_relaxed);
-  if (state && input && rt::vm::committed(input + 12, 4) && r32(input + 12) == state && g_look.exchange(look) != look)
-    LOG_I("input", "mouse look: player look control 0x%08x (input 0x%08x), pitch state at 0x%08x", look, input, look + kPitchState);
+  if (state && input && rt::vm::committed(input + 12, 4) && r32(input + 12) == state) {
+    if (g_look.exchange(look) != look)
+      LOG_I("input", "mouse look: player look control 0x%08x (input 0x%08x), pitch state at 0x%08x", look, input, look + kPitchState);
+    // Diagnostics: the frame time the game hands its simulation (f1), summarized every 5 s.
+    static double sum = 0, lo = 1e9, hi = 0;
+    static u64 n = 0;
+    static LARGE_INTEGER since{};
+    LARGE_INTEGER now, freq;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    if (!since.QuadPart) since = now;
+    double dt = ctx.f[1];
+    sum += dt, lo = std::min(lo, dt), hi = std::max(hi, dt), ++n;
+    if (double(now.QuadPart - since.QuadPart) / double(freq.QuadPart) >= 5.0) {
+      LOG_I("input", "game frame time (player look control): %llu frames, mean %.2f ms, min %.2f, max %.2f", (unsigned long long)n,
+            sum / double(n) * 1000, lo * 1000, hi * 1000);
+      sum = 0, lo = 1e9, hi = 0, n = 0, since = now;
+    }
+  }
   orig(ctx);
 }
 

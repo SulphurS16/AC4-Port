@@ -43,6 +43,7 @@ struct Config {
   bool gpu_submit_thread = true;    // D3D11 calls on their own thread (gpu/submit.h); off: FIFO thread
   std::string priority;             // process priority class: "" (normal), "above-normal", "high"
   int gpu_timing = 0;               // GPU time per pass (gpu/gpu_timing.h), logged every 5 s; 2: per draw
+  double present_delay_ms = 0;      // diagnostics: extra time per flip (emulates a slow GPU / low frame rate)
   std::string spu_cache;            // where collected SPU code records are written
   std::string shader_cache;         // compiled HLSL (derived from the game's shaders; machine-local)
 };

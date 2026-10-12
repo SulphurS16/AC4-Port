@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "runtime/config.h"
 #include "runtime/hle.h"
 #include "runtime/lv2/lv2.h"
 #include "runtime/memory.h"
@@ -107,13 +108,45 @@ void vblank_thread() {
 
 }  // namespace
 
+namespace {
+// A guest thread waiting for the FIFO to leave a command buffer segment (wait_get_outside).
+std::atomic<bool> g_get_waiting{false};
+std::atomic<u32> g_get_lo{0}, g_get_hi{0};
+HANDLE g_get_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+inline void notify_get(u32 get) {
+  if (!g_get_waiting.load(std::memory_order_relaxed)) return;
+  if (get >= g_get_lo.load(std::memory_order_relaxed) && get <= g_get_hi.load(std::memory_order_relaxed)) return;
+  g_get_waiting.store(false, std::memory_order_relaxed);
+  SetEvent(g_get_event);
+}
+}  // namespace
+
+void wait_get_outside(u32 lo, u32 hi) {
+  auto* ctrl_get = reinterpret_cast<volatile u32*>(ppu::mem() + kControlAddr + 4);
+  auto outside = [&] {
+    u32 get = __builtin_bswap32(*ctrl_get);
+    return get < lo || get > hi;
+  };
+  if (outside()) return;
+  note_block();
+  g_get_lo = lo;
+  g_get_hi = hi;
+  for (;;) {
+    g_get_waiting.store(true, std::memory_order_seq_cst);
+    if (outside()) break;
+    WaitForSingleObject(g_get_event, 2);  // the timeout only guards against a lost wake-up
+  }
+  g_get_waiting.store(false, std::memory_order_relaxed);
+}
+
 void clear_flip_label() {
   ppu::w64(kLabelAddr + 0x10, 0);
   ppu::w64(kLabelAddr + 0x18, 0);
 }
 
 // ---------------------------------------------------------------------------------------------
-// Register reset state (rsx_facts.md §3-7: the documented defaults). Games rely on registers they
+// Register reset state (rsx_facts.md ??3-7: the documented defaults). Games rely on registers they
 // never write, e.g. the front face (CCW) when they enable culling.
 void init_register_defaults() {
   auto set = [](u32 method, u32 v) { g.regs[method >> 2] = v; };
@@ -278,6 +311,13 @@ u64 vblank_count() { return g_vblank.load(); }
 // Without a model of rendering time, a second flip within the same refresh period waits for the
 // next vblank (otherwise the game would run its loop several times per displayed frame).
 void do_flip(u32 id) {
+  if (double ms = cfg().present_delay_ms; ms > 0) {  // diagnostics: a slow GPU, i.e. a low frame rate
+    if (static bool logged = false; !logged) {
+      logged = true;
+      LOG_W("rsx", "--present-delay: every flip waits %.1f ms more (diagnostics, not for play)", ms);
+    }
+    lv2::sleep_us(u64(ms * 1000));
+  }
   if (g_flip_mode.load() == 1 || g_flip_vblank == g_vblank.load()) {
     std::unique_lock lk(g_vb_mu);
     u64 v = g_vblank.load();
@@ -367,6 +407,7 @@ void fifo_thread() {
       }
     }
     *ctrl_get = __builtin_bswap32(get);
+    notify_get(get);
   }
 }
 
