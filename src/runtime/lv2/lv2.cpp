@@ -45,7 +45,7 @@ static void install_update_data() {
 }
 
 void lv2_init() {
-  vfs::init(cfg().disc_root, cfg().hdd0, cfg().hdd1, cfg().flash);
+  vfs::init(cfg().disc_root, cfg().hdd0, cfg().hdd1, cfg().flash, cfg().test_overlay);
   ac4::add_protected_root(cfg().flash);
   install_update_data();
   LOG_I("lv2", "lv2 initialized");

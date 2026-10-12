@@ -2,6 +2,8 @@
 //   /dev_bdvd  -> disc root (read-only)        /app_home -> disc PS3_GAME/USRDIR (read-only)
 //   /dev_hdd0  -> local/hdd0 (writable)         /dev_hdd1 -> local/hdd1 (writable)
 //   /dev_flash -> extracted firmware dev_flash (read-only, from the user's PS3UPDAT.PUP)
+// Test aid (--test-overlay DIR): a file present under DIR (same layout as the disc root) is read
+// instead of the disc's; the disc is never modified. Every overlaid file is logged.
 #pragma once
 #include <filesystem>
 #include <string>
@@ -11,7 +13,8 @@
 
 namespace rt::vfs {
 
-void init(const std::string& disc_root, const std::string& hdd0, const std::string& hdd1, const std::string& flash);
+void init(const std::string& disc_root, const std::string& hdd0, const std::string& hdd1, const std::string& flash,
+          const std::string& test_overlay = {});
 
 struct Resolved {
   std::filesystem::path host;

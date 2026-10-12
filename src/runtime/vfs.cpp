@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 
 #include "common/file.h"
 #include "runtime/hle.h"
@@ -21,6 +22,9 @@ struct Mount {
   bool writable;
 };
 std::vector<Mount> g_mounts;
+fs::path g_disc, g_overlay;  // test overlay over the disc (vfs.h)
+std::mutex g_overlay_mu;
+std::set<std::string> g_overlaid;  // logged once each
 
 struct File {
   HANDLE h = INVALID_HANDLE_VALUE;
@@ -63,7 +67,11 @@ s32 win_err(DWORD e) {
 
 }  // namespace
 
-void init(const std::string& disc, const std::string& hdd0, const std::string& hdd1, const std::string& flash) {
+void init(const std::string& disc, const std::string& hdd0, const std::string& hdd1, const std::string& flash,
+          const std::string& test_overlay) {
+  g_disc = fs::path(disc);
+  g_overlay = test_overlay.empty() ? fs::path() : fs::path(test_overlay);
+  if (!g_overlay.empty()) LOG_W("vfs", "TEST OVERLAY %s: its files replace disc files (test aid)", test_overlay.c_str());
   g_mounts = {
       {"/dev_bdvd", fs::path(disc), false},
       {"/app_home", fs::path(disc) / "PS3_GAME" / "USRDIR", false},
@@ -101,6 +109,16 @@ bool resolve(const std::string& gp, Resolved& out) {
       h /= fs::u8path(parts[k]);
     }
     out = {h, m.writable, m.prefix};
+    if (!g_overlay.empty() && !m.writable && (m.prefix == "/dev_bdvd" || m.prefix == "/app_home")) {
+      std::error_code ec;
+      fs::path rel = h.lexically_relative(g_disc);
+      fs::path o = g_overlay / rel;
+      if (!rel.empty() && *rel.begin() != ".." && fs::is_regular_file(o, ec)) {
+        out.host = o;
+        std::lock_guard lk(g_overlay_mu);
+        if (g_overlaid.insert(o.string()).second) LOG_W("vfs", "TEST OVERLAY: %s read from %s", gp.c_str(), o.string().c_str());
+      }
+    }
     return true;
   }
   return false;

@@ -53,6 +53,7 @@ struct Config {
                                     // kFpsDisplay; locked to the display when the rate divides its refresh
   bool vsync = true;                // presents wait for the display's refresh (no tearing); off: lowest latency
   bool fullscreen = false;          // start in borderless fullscreen (F11 / Alt+Enter toggle)
+  std::string test_overlay;         // test aid: files here replace disc files (vfs.h; tools/testaid.py)
   std::string spu_cache;            // where collected SPU code records are written
   std::string shader_cache;         // compiled HLSL (derived from the game's shaders; machine-local)
 };

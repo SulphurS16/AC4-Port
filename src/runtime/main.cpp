@@ -111,6 +111,7 @@ int main(int argc, char** argv) {
     }
     else if (a == "--vsync") c.vsync = next() != "off";
     else if (a == "--fullscreen") c.fullscreen = true;
+    else if (a == "--test-overlay") c.test_overlay = next();
     else if (a == "--gpu-timing-draws") c.gpu_timing = 2;
     else if (a == "--spu-cache") c.spu_cache = next();
     else if (a == "--shot-interval") c.shot_interval = std::atof(next().c_str());
