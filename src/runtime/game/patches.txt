@@ -1,0 +1,35 @@
+# Instruction rewrites applied by ac4-recomp (emit --patches; BLUS30027, disc 01.01).
+# No game bytes here: a rule names a function and an instruction pattern, and the recompiler
+# checks the number of matches (a different count stops the build: another game version).
+# Format: imm <function entry> addis|lis <old immediate> <new immediate> <count>   # comment
+#
+# Draw-data arenas (docs/GAME_NOTES.md "Draw-data arenas"): two per-frame arenas of 0x30000
+# 16-byte units with the unit counter and five more fields right after the data (+0x300000);
+# nothing checks the bound, and m010's swarm fills 98.5% at 60 frames/s (more at higher rates).
+# Every "arena object/arena + 0x300000" (addis ...,0x30) moves to +0x2000000 (32 MiB of data),
+# and the initializer asks for objects that large (lis r4,0x30 -> 0x200 in its 0x301050 size);
+# game/frame_hooks.cpp gives those objects the port's own guest memory (hook_heap_alloc).
+imm 0x008ecb88 addis 0x30 0x200 138   # draw-list initializer: arena fields of both objects
+imm 0x008ecb88 lis   0x30 0x200 1     # ... and the arena object size (0x301050 -> 0x2001050)
+imm 0x008eb138 addis 0x30 0x200 1
+imm 0x008eb288 addis 0x30 0x200 1
+imm 0x008eb628 addis 0x30 0x200 1     # records the arena position in a layer entry
+imm 0x008eb724 addis 0x30 0x200 1     # peek: next free unit
+imm 0x008ebbac addis 0x30 0x200 1     # arena object init (function pointer)
+imm 0x008ebcac addis 0x30 0x200 1     # arena object init (function pointer)
+imm 0x008ebe20 addis 0x30 0x200 1
+imm 0x008ebfd8 addis 0x30 0x200 1     # layer entry record
+imm 0x008ec0bc addis 0x30 0x200 1
+imm 0x008ec1ec addis 0x30 0x200 1
+imm 0x008ec31c addis 0x30 0x200 1
+imm 0x008edfa8 addis 0x30 0x200 1
+imm 0x008ee160 addis 0x30 0x200 1
+imm 0x008ee3c8 addis 0x30 0x200 1
+imm 0x008ee624 addis 0x30 0x200 1
+imm 0x0095c370 addis 0x30 0x200 1     # arena: counter reset
+imm 0x0095c380 addis 0x30 0x200 1     # arena: counter add
+imm 0x0095c67c addis 0x30 0x200 1     # arena: init
+imm 0x0095c69c addis 0x30 0x200 1     # arena: allocate and copy (called through a stub from 0x6eb4b0)
+imm 0x0095c828 addis 0x30 0x200 1     # arena: reset
+imm 0x0095c848 addis 0x30 0x200 1     # arena: allocate (0x8eb6e4)
+imm 0x0095c888 addis 0x30 0x200 1     # arena: allocate (through a stub from 0x5eb56c)

@@ -119,6 +119,20 @@ u8 Image::r8(u32 va) const {
   return *p;
 }
 
+void Image::patch32(u32 va, u32 expect, u32 value) {
+  const u8* p = ptr(va, 4);
+  if (!p || (p >= d_.data() + d_.size() || p < d_.data()))
+    throw std::runtime_error(strprintf("patch at 0x%08x: not in the file's data", va));
+  if (rd_be32(p) != expect)
+    throw std::runtime_error(strprintf("patch at 0x%08x: found 0x%08x, expected 0x%08x (another game version?)", va, rd_be32(p),
+                                       expect));
+  u8* w = &d_[size_t(p - d_.data())];
+  w[0] = u8(value >> 24);
+  w[1] = u8(value >> 16);
+  w[2] = u8(value >> 8);
+  w[3] = u8(value);
+}
+
 std::string Image::cstr(u32 va, size_t maxlen) const {
   std::string s;
   for (size_t i = 0; i < maxlen; ++i) {

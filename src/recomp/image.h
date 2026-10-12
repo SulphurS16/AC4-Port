@@ -35,6 +35,8 @@ class Image {
 
   bool mapped(u32 va, u32 len = 1) const;
   u32 r32(u32 va) const;  // throws if unmapped
+  // Replaces the word at va (file-backed) when it holds `expect`; throws otherwise.
+  void patch32(u32 va, u32 expect, u32 value);
   u8 r8(u32 va) const;
   std::string cstr(u32 va, size_t maxlen = 256) const;
 

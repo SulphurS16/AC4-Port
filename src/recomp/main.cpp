@@ -84,7 +84,7 @@ static int cmd_fingerprint(const Image& img, const Analysis& an) {
 int main(int argc, char** argv) {
   try {
     if (argc < 3) {
-      std::fprintf(stderr, "usage: ac4-recomp analyze|disasm|func|emit <eboot.elf> ...\n");
+      std::fprintf(stderr, "usage: ac4-recomp analyze|disasm|func|emit <eboot.elf> ... [--patches FILE]\n");
       return 2;
     }
     std::string cmd = argv[1];
@@ -102,6 +102,44 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     Analysis an(img);
     an.run();
+    // Instruction rewrites (--patches FILE, any command, after analysis: they change immediates
+    // only, never control flow; the emitter reads instruction words from the image). Lines:
+    //   imm <function entry> addis|lis <old> <new> <count>   [# comment]
+    // rewrite the 16-bit immediate of every addis (rA != 0) or lis (rA == 0) in the function whose
+    // immediate is <old>; the number of matches must be <count>.
+    for (int i = 3; i + 1 < argc; ++i) {
+      if (std::string(argv[i]) != "--patches") continue;
+      std::vector<u8> raw = ac4::read_file(argv[i + 1]);
+      std::istringstream in(std::string(raw.begin(), raw.end()));
+      std::string line;
+      size_t rules = 0, words = 0;
+      while (std::getline(in, line)) {
+        if (size_t c = line.find('#'); c != std::string::npos) line.resize(c);
+        std::istringstream ls(line);
+        std::string kind, fn, mn, o, v, cnt;
+        if (!(ls >> kind)) continue;
+        if (kind != "imm" || !(ls >> fn >> mn >> o >> v >> cnt) || (mn != "addis" && mn != "lis"))
+          throw std::runtime_error("bad patch line: " + line);
+        u32 entry = parse_u32(fn.c_str()), old_imm = parse_u32(o.c_str()), new_imm = parse_u32(v.c_str());
+        u32 want = parse_u32(cnt.c_str());
+        auto it = an.functions().find(entry);
+        if (it == an.functions().end()) throw std::runtime_error(ac4::strprintf("patch: no function at 0x%08x", entry));
+        u32 found = 0;
+        for (u32 x : it->second.insns) {
+          u32 w = img.r32(x);
+          bool lis = ((w >> 16) & 31) == 0;
+          if ((w >> 26) != 15 || (w & 0xffff) != old_imm || lis != (mn == "lis")) continue;
+          img.patch32(x, w, (w & 0xffff0000u) | (new_imm & 0xffff));
+          ++found;
+        }
+        if (found != want)
+          throw std::runtime_error(ac4::strprintf("patch: %u %s 0x%x in 0x%08x, expected %u (another game version?)", found, mn.c_str(),
+                                             old_imm, entry, want));
+        ++rules;
+        words += found;
+      }
+      std::printf("%zu patch rule(s), %zu instruction(s) rewritten (%s)\n", rules, words, argv[i + 1]);
+    }
     double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     const auto& st = an.stats();
     if (cmd == "analyze") {
@@ -147,6 +185,7 @@ int main(int argc, char** argv) {
       for (int i = 4; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--comments") opt.comments = true;
+        else if (a == "--patches" && i + 1 < argc) ++i;  // applied above
         else if (a == "--hooks" && i + 1 < argc) {  // lines "0xADDR name [# comment]"
           std::vector<u8> raw = ac4::read_file(argv[++i]);
           std::istringstream in(std::string(raw.begin(), raw.end()));
