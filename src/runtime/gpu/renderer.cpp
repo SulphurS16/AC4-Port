@@ -578,6 +578,14 @@ u32 g_vp_gen = 0;  // bumped when a program word changes
 float g_vc[512 * 4];
 u32 g_vc_load = 0;
 bool g_vc_dirty = true;
+// Words of g_vc written since the last upload, [lo, hi): only those constants are recorded (heavy
+// scenes change one or two of the 512 constants per draw; the submission side uploads whole).
+u32 g_vc_lo = 0, g_vc_hi = 512 * 4;
+inline void vc_mark(u32 word, u32 n) {
+  g_vc_dirty = true;
+  g_vc_lo = std::min(g_vc_lo, word);
+  g_vc_hi = std::max(g_vc_hi, word + n);
+}
 
 struct VsEntry {
   ID3D11VertexShader* vs = nullptr;
@@ -672,6 +680,11 @@ struct TexEntry {
   u32 checked_serial = 0;  // write-tracking serial when the contents were last verified
   u32 w = 0, h = 0, d = 1;
   u64 bytes = 0, last_used = 0;  // host texture size; frame of the last lookup (cache trimming)
+  // Contents changed after the first upload (movie frames, render-time data): the host texture
+  // is updated in place (DEFAULT usage) and a written texture is converted without hashing.
+  bool dynamic = false;
+  DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+  u32 mips = 0, faces = 0;
 };
 
 // Guest page write tracking: per 4 KiB page, the serial of the last collection that saw it
@@ -989,27 +1002,43 @@ ID3D11ShaderResourceView* texture_view(const gpu::TexDesc& t, float* scale) {
     e.checked_serial = g_mem_serial;
     return e.srv;
   }
-  u64 h = hash_bytes(::ppu::mem() + ea, size);
-  ++g_rs.tex_hashed;
   e.checked_serial = g_mem_serial;
-  if (e.srv && e.hash == h) return e.srv;
+  if (!e.dynamic) {  // a dynamic texture that was written has new contents: no hash needed
+    u64 h = hash_bytes(::ppu::mem() + ea, size);
+    ++g_rs.tex_hashed;
+    if (e.srv && e.hash == h) return e.srv;
+    e.hash = h;
+  }
   gpu::TexData data;
   ++g_rs.tex_uploaded;
   if (!gpu::convert_texture(t, ::ppu::mem() + ea, &data)) {
     warn_once("tex-cvt-" + std::to_string(t.format), "texture conversion failed: " + data.error);
     return nullptr;
   }
+  // Same shape as the host texture of a dynamic entry: update it in place, in command order. The
+  // converted levels move into the recorded call (no copy into the recorder: movie frames).
+  if (e.dynamic && e.tex && e.w == data.width && e.h == data.height && e.d == data.depth && e.mips == data.mips &&
+      e.faces == data.faces && e.fmt == data.format) {
+    gpu::rec().call([tex = e.tex, levels = std::move(data.levels)](ID3D11DeviceContext* c) {
+      for (size_t i = 0; i < levels.size(); ++i)
+        c->UpdateSubresource(tex, UINT(i), nullptr, levels[i].data.data(), levels[i].row_pitch, levels[i].slice_pitch);
+    });
+    return e.srv;
+  }
+  bool changed = e.srv != nullptr;  // new contents for an entry that had others: it changes (will again)
   release(e.srv);
   release(e.tex);
+  e.srv = nullptr;
+  e.tex = nullptr;
   g_tex_bytes -= e.bytes;
   e.bytes = 0;
-  e.hash = h;
+  e.dynamic = e.dynamic || changed;
   std::vector<D3D11_SUBRESOURCE_DATA> init;
   for (auto& L : data.levels) init.push_back({L.data.data(), L.row_pitch, L.slice_pitch});
   auto* dev = device().dev;
+  D3D11_USAGE usage = e.dynamic ? D3D11_USAGE_DEFAULT : D3D11_USAGE_IMMUTABLE;
   if (t.dim == 3) {
-    D3D11_TEXTURE3D_DESC td{data.width, data.height, data.depth, data.mips, data.format, D3D11_USAGE_IMMUTABLE,
-                            D3D11_BIND_SHADER_RESOURCE, 0, 0};
+    D3D11_TEXTURE3D_DESC td{data.width, data.height, data.depth, data.mips, data.format, usage, D3D11_BIND_SHADER_RESOURCE, 0, 0};
     ID3D11Texture3D* t3 = nullptr;
     dev->CreateTexture3D(&td, init.data(), &t3);
     e.tex = t3;
@@ -1021,7 +1050,7 @@ ID3D11ShaderResourceView* texture_view(const gpu::TexDesc& t, float* scale) {
     td.ArraySize = data.faces;
     td.Format = data.format;
     td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_IMMUTABLE;
+    td.Usage = usage;
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     td.MiscFlags = t.cubemap ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
     ID3D11Texture2D* t2 = nullptr;
@@ -1032,6 +1061,12 @@ ID3D11ShaderResourceView* texture_view(const gpu::TexDesc& t, float* scale) {
     dev->CreateShaderResourceView(e.tex, nullptr, &e.srv);
     for (auto& L : data.levels) e.bytes += L.data.size();
     g_tex_bytes += e.bytes;
+    e.w = data.width;
+    e.h = data.height;
+    e.d = data.depth;
+    e.mips = data.mips;
+    e.faces = data.faces;
+    e.fmt = data.format;
   } else {
     warn_once("tex-create", ac4::strprintf("texture creation failed (%ux%u format %d, %.0f MiB cached): drawn without it",
                                             data.width, data.height, int(data.format), g_tex_bytes / 1048576.0));
@@ -2063,8 +2098,11 @@ void flush_draw() {
   phase_switch(kPhConstants);
   // Constant buffers.
   if (g_vc_dirty) {
-    c->UpdateSubresource(g_vc_buf, 0, nullptr, g_vc, 0, 0, sizeof g_vc);
+    u32 lo = g_vc_lo & ~3u, hi = std::min<u32>((g_vc_hi + 3) & ~3u, 512 * 4);  // whole constants
+    if (hi > lo) c->UpdateConstants(g_vc_buf, lo * 4, (hi - lo) * 4, &g_vc[lo]);
     g_vc_dirty = false;
+    g_vc_lo = 512 * 4;
+    g_vc_hi = 0;
   }
   VsState vst{};
   for (int i = 0; i < 4; ++i) {
@@ -2192,8 +2230,9 @@ void flush_draw() {
       Surface* ts = texture_surface(tex[u]);
       fr_touch(ts);
       if (!ts) fr_texture(srvs[u], tex[u]);
-      tx += ac4::strprintf(" t%u=%s%x/f%02x/%ux%u/%s%s", u, tex[u].location ? "M:" : "", tex[u].offset, tex[u].format, tex[u].width,
-                            tex[u].height, ts ? "surf" : "mem", srvs[u] ? "" : "(unbound)");
+      tx += ac4::strprintf(" t%u=%s%x/f%02x%s/%ux%u/%s/r%04x%s", u, tex[u].location ? "M:" : "", tex[u].offset, tex[u].format,
+                            tex[u].linear ? "ln" : "", tex[u].width, tex[u].height, ts ? "surf" : "mem", tex[u].remap & 0xffff,
+                            srvs[u] ? "" : "(unbound)");
     }
     LOG_I("frame", "draw %u prim %u verts %zu idx %zu %s vp %u fp %08x zt %d/%x/%d blend %d cull %x%s", g_fr.draws, prim, verts.size() / 64,
           indices.size(), targets_desc(t).c_str(), reg(m::SET_TRANSFORM_PROGRAM_START), sp, reg(m::SET_DEPTH_TEST_ENABLE) ? 1 : 0,
@@ -2534,6 +2573,17 @@ void present_buffer(u32 id, const DisplayBuffer& b) {
   gpu::apply_submit_mode();
 }
 
+void renderer_constants(u32 first, const u8* be, u32 count) {
+  u32 word = g_vc_load * 4 + first, n = 0;
+  for (; n < count && word + n < 468 * 4; ++n) {
+    u32 v;
+    std::memcpy(&v, be + 4 * n, 4);
+    v = __builtin_bswap32(v);
+    std::memcpy(&g_vc[word + n], &v, 4);
+  }
+  if (n) vc_mark(word, n);
+}
+
 void renderer_method(u32 ri, u32 arg, u32 count, u32 index) {
   u32 method = ri << 2;
   if (method >= m::SET_TRANSFORM_PROGRAM && method < m::SET_TRANSFORM_PROGRAM + 0x80) {
@@ -2550,7 +2600,7 @@ void renderer_method(u32 ri, u32 arg, u32 count, u32 index) {
     u32 word = g_vc_load * 4 + ((method - m::SET_TRANSFORM_CONSTANT) >> 2);
     if (word < 468 * 4) {
       std::memcpy(&g_vc[word], &arg, 4);
-      g_vc_dirty = true;
+      vc_mark(word, 1);
     }
     return;
   }

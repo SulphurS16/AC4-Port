@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "runtime/gpu/d3d11_device.h"
@@ -43,6 +44,7 @@ enum class Op : u32 {
   ClearDepthStencilView,
   CopyResource,
   UpdateSubresource,
+  UpdateConstants,
   WriteBuffer,
   Release,
   Call,
@@ -84,6 +86,7 @@ bool g_async = false;          // mode in effect (FIFO thread)
 bool g_started = false;
 std::atomic<int> g_want{-1};   // requested mode (-1: none)
 u64 g_chunks_sent = 0;         // FIFO thread
+u32 g_kicks = 0;               // draws recorded since the last handover (FIFO thread)
 u64 g_frames_sent = 0;         // FIFO thread
 std::atomic<u64> g_chunks_done{0}, g_frames_done{0};
 std::atomic<bool> g_idle{true};
@@ -181,6 +184,24 @@ struct UpdateArgs {
   UINT row, depth;
   size_t bytes;
 };  // followed by the data
+struct ConstArgs {
+  ID3D11Buffer* b;
+  UINT offset, bytes;
+};  // followed by the data
+// The executing side's copy of each constant buffer updated with UpdateConstants: patched, then
+// uploaded whole (only the submission thread, or the FIFO thread in synchronous mode, uses it).
+std::unordered_map<ID3D11Buffer*, std::vector<u8>> g_cb_shadow;
+void apply_constants(ID3D11DeviceContext* x, ID3D11Buffer* b, u32 offset, u32 bytes, const void* data) {
+  std::vector<u8>& s = g_cb_shadow[b];
+  if (s.empty()) {
+    D3D11_BUFFER_DESC bd{};
+    b->GetDesc(&bd);
+    s.assign(bd.ByteWidth, 0);
+  }
+  if (offset >= s.size()) return;
+  std::memcpy(s.data() + offset, data, std::min<size_t>(bytes, s.size() - offset));
+  x->UpdateSubresource(b, 0, nullptr, s.data(), 0, 0);
+}
 struct WriteArgs {
   ID3D11Buffer* b;
   D3D11_MAP mode;
@@ -283,6 +304,11 @@ void execute(Chunk& c, ID3D11DeviceContext* x) {
       case Op::UpdateSubresource: {
         auto* r = static_cast<UpdateArgs*>(a);
         x->UpdateSubresource(r->r, r->sub, r->has_box ? &r->box : nullptr, payload(r), r->row, r->depth);
+        break;
+      }
+      case Op::UpdateConstants: {
+        auto* r = static_cast<ConstArgs*>(a);
+        apply_constants(x, r->b, r->offset, r->bytes, payload(r));
         break;
       }
       case Op::WriteBuffer: {
@@ -505,6 +531,18 @@ void Recorder::UpdateSubresource(ID3D11Resource* res, UINT sub, const D3D11_BOX*
   r->bytes = bytes;
   std::memcpy(payload(r), data, bytes);
 }
+void Recorder::UpdateConstants(ID3D11Buffer* b, u32 offset, u32 bytes, const void* data) {
+  if (!g_async) {
+    sync_pending();
+    apply_constants(ctx(), b, offset, bytes, data);
+    return;
+  }
+  auto* r = emit<ConstArgs>(Op::UpdateConstants, bytes);
+  r->b = b;
+  r->offset = offset;
+  r->bytes = bytes;
+  std::memcpy(payload(r), data, bytes);
+}
 void Recorder::write_buffer(ID3D11Buffer* b, D3D11_MAP mode, u32 offset, const void* data, u32 bytes) {
   std::memcpy(write_buffer_space(b, mode, offset, bytes), data, bytes);
 }
@@ -563,6 +601,7 @@ void Recorder::flush() {
     return;
   }
   if (!g_cur->size) return;
+  g_kicks = 0;
   auto next = take_chunk();
   {
     std::unique_lock lk(g_mu);
@@ -577,7 +616,12 @@ void Recorder::flush() {
 
 void Recorder::kick() {
   if (!g_async || !g_cur->size) return;
-  if (g_idle.load(std::memory_order_relaxed) || g_cur->size > (size_t(512) << 10)) flush();
+  // Hand over in batches: a handover is a lock round trip plus waking the submission thread,
+  // which dominated heavy scenes when done after every draw (1500-2000 small draws per frame).
+  ++g_kicks;
+  if (g_cur->size > (size_t(512) << 10) ||
+      (g_idle.load(std::memory_order_relaxed) && (g_kicks >= 32 || g_cur->size >= (size_t(64) << 10))))
+    flush();
 }
 
 void Recorder::frame_end(u32 max_frames) {

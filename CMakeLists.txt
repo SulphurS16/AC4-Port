@@ -110,3 +110,9 @@ add_executable(ac4-vdectest src/tools/vdectest.cpp src/runtime/media/mpeg2_video
 target_include_directories(ac4-vdectest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ac4-vdectest PRIVATE ac4_common mfplat mfuuid ole32 winmm)
 target_compile_options(ac4-vdectest PRIVATE ${AC4_CPU_FLAGS} -Wall -Wextra -Wno-unused-parameter -g)
+
+# ---- texture conversion test (fast paths against the per-texel path, random data) ----
+add_executable(ac4-textest src/tools/textest.cpp src/runtime/gpu/rsx_texture.cpp)
+target_include_directories(ac4-textest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ac4-textest PRIVATE ac4_common)
+target_compile_options(ac4-textest PRIVATE ${AC4_CPU_FLAGS} -Wall -Wextra -Wno-unused-parameter -O2)

@@ -5,6 +5,7 @@
 #include "runtime/gpu/rsx_texture.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 
 namespace rt::gpu {
@@ -75,6 +76,43 @@ u32 remap_to_rgba(u32 argb, u32 remap) {
     out[c] = op == 0 ? 0 : op == 1 ? 0xff : in[src];
   }
   return u32(out[1]) | (u32(out[2]) << 8) | (u32(out[3]) << 16) | (u32(out[0]) << 24);
+}
+
+// A 32-bit ARGB texel (bytes A, R, G, B in memory) under a CONTROL1 remap is a fixed byte
+// permutation plus constants: output RGBA byte k is source byte src[k], or constant (src -1,
+// value in `set`). D8R8G8B8 (0x9E) reads its alpha as 1.
+struct Perm32 {
+  int src[4];
+  u32 set = 0;
+  enum Kind { kCopy, kRot8, kGeneric } kind = kGeneric;
+};
+Perm32 perm32(u32 format, u32 remap) {
+  Perm32 p;
+  static const u32 kComp[4] = {1, 2, 3, 0};  // output bytes R, G, B, A = components 1, 2, 3, 0 (A R G B order)
+  for (u32 k = 0; k < 4; ++k) {
+    u32 c = kComp[k], src = (remap >> (2 * c)) & 3, op = (remap >> (8 + 2 * c)) & 3;
+    if (op >= 2 && !(format == 0x9E && src == 0)) {
+      p.src[k] = int(src);  // component index = byte index in memory (A R G B)
+    } else {
+      p.src[k] = -1;
+      if (op == 1 || op >= 2) p.set |= 0xffu << (8 * k);  // op 1 (or D8R8G8B8's alpha): 1
+    }
+  }
+  if (!p.set && p.src[0] == 0 && p.src[1] == 1 && p.src[2] == 2 && p.src[3] == 3) p.kind = Perm32::kCopy;
+  else if (!p.set && p.src[0] == 1 && p.src[1] == 2 && p.src[2] == 3 && p.src[3] == 0) p.kind = Perm32::kRot8;
+  return p;
+}
+inline u32 apply_perm32(const Perm32& p, u32 v) {  // v: the 4 memory bytes, little-endian load
+  switch (p.kind) {
+    case Perm32::kCopy: return v;
+    case Perm32::kRot8: return std::rotr(v, 8);
+    default: {
+      u32 o = p.set;
+      for (u32 k = 0; k < 4; ++k)
+        if (p.src[k] >= 0) o |= ((v >> (8 * p.src[k])) & 0xffu) << (8 * k);
+      return o;
+    }
+  }
 }
 
 u32 morton2d(u32 x, u32 y, u32 lw, u32 lh) {
@@ -207,14 +245,15 @@ u32 layout(const TexDesc& t, std::vector<LevelLayout>* out) {
     if (swz && face) off = (off + 127) & ~127u;
     for (u32 lv = 0; lv < t.mips; ++lv) {
       u32 w = std::max(t.width >> lv, 1u), h = std::max(t.height >> lv, 1u), d = std::max(t.depth >> lv, 1u);
-      u32 sw = w + 2 * border, sh = h + 2 * border;
-      if (swz && border) {
-        sw = 1u << log2u(w + 8);
-        sh = 1u << log2u(h + 8);
+      u32 sw = w + 2 * border, sh = h + 2 * border, sd = d;
+      if (swz) {  // Morton addressing spans the power-of-two size (hardware requires it for swizzling)
+        sw = border ? 1u << log2u(w + 8) : 1u << log2u(w);
+        sh = border ? 1u << log2u(h + 8) : 1u << log2u(h);
+        sd = 1u << log2u(d);
       }
       u32 uw = (sw + unit_w(t.format) - 1) / unit_w(t.format), uh = (sh + unit_h(t.format) - 1) / unit_h(t.format);
       u32 pitch = t.linear ? (t.pitch ? t.pitch : uw * bpu) : uw * bpu;
-      u32 bytes = pitch * uh * d;
+      u32 bytes = pitch * uh * sd;
       if (out) out->push_back({off, w, h, d, pitch, bytes});
       off += bytes;
     }
@@ -224,6 +263,8 @@ u32 layout(const TexDesc& t, std::vector<LevelLayout>* out) {
 }  // namespace
 
 u32 texture_size(const TexDesc& t) { return layout(t, nullptr); }
+
+bool g_texture_fast_paths = true;
 
 bool convert_texture(const TexDesc& t, const u8* src, TexData* out) {
   std::vector<LevelLayout> levels;
@@ -243,6 +284,13 @@ bool convert_texture(const TexDesc& t, const u8* src, TexData* out) {
   u32 out_bpp = fl ? (t.format == 0x9A ? 8 : 16) : 4;
   out->format = !fl ? DXGI_FORMAT_R8G8B8A8_UNORM
                     : t.format == 0x9A ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
+  // Fast path for 32-bit ARGB texels (A8R8G8B8, D8R8G8B8: e.g. movie frames, 1280x720): the remap
+  // is a byte permutation per texel (perm32): a copy for movie frames stored as RGBA (remap
+  // 0xAA93), one rotation for plain ARGB. Swizzled layouts use per-level Morton tables: x and y
+  // bits interleave independently, so a texel's offset is mx[x] | my[y].
+  bool fast32 = g_texture_fast_paths && (t.format == 0x85 || t.format == 0x9E);
+  Perm32 perm = perm32(t.format, t.remap);
+  std::vector<u32> mx, my;
   for (const LevelLayout& L : levels) {
     TexData::Level o;
     o.row_pitch = L.w * out_bpp;
@@ -252,6 +300,44 @@ bool convert_texture(const TexDesc& t, const u8* src, TexData* out) {
     u32 sw = swz && border ? (1u << log2u(L.w + 8)) : L.w + 2 * border;
     u32 sh = swz && border ? (1u << log2u(L.h + 8)) : L.h + 2 * border;
     u32 lw = log2u(sw), lh = log2u(sh), ld = log2u(L.d);
+    if (fast32 && L.d == 1) {
+      if (swz) {
+        mx.resize(L.w);
+        my.resize(L.h);
+        for (u32 x = 0; x < L.w; ++x) mx[x] = morton2d(x + border, 0, lw, lh);
+        for (u32 y = 0; y < L.h; ++y) my[y] = morton2d(0, y + border, lw, lh);
+      }
+      for (u32 y = 0; y < L.h; ++y) {
+        u32* row = reinterpret_cast<u32*>(o.data.data() + size_t(y) * o.row_pitch);
+        if (swz) {
+          u32 myy = my[y];
+          for (u32 x = 0; x < L.w; ++x) {
+            u32 v;
+            std::memcpy(&v, base + size_t(mx[x] | myy) * 4, 4);
+            row[x] = apply_perm32(perm, v);
+          }
+        } else {
+          const u8* srow = base + size_t(y + border) * L.row_pitch + size_t(border) * 4;
+          if (perm.kind == Perm32::kCopy) {
+            std::memcpy(row, srow, size_t(L.w) * 4);
+          } else if (perm.kind == Perm32::kRot8) {
+            for (u32 x = 0; x < L.w; ++x) {
+              u32 v;
+              std::memcpy(&v, srow + size_t(x) * 4, 4);
+              row[x] = std::rotr(v, 8);
+            }
+          } else {
+            for (u32 x = 0; x < L.w; ++x) {
+              u32 v;
+              std::memcpy(&v, srow + size_t(x) * 4, 4);
+              row[x] = apply_perm32(perm, v);
+            }
+          }
+        }
+      }
+      out->levels.push_back(std::move(o));
+      continue;
+    }
     for (u32 z = 0; z < L.d; ++z)
       for (u32 y = 0; y < L.h; ++y) {
         u8* row = o.data.data() + size_t(z) * o.slice_pitch + size_t(y) * o.row_pitch;

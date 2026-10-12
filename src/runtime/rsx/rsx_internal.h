@@ -31,6 +31,9 @@ void renderer_thread_init();
 void renderer_idle();
 void present_buffer(u32 id, const DisplayBuffer& b);
 void renderer_method(u32 reg_index, u32 arg, u32 count, u32 index);  // state/draw methods
+// A SET_TRANSFORM_CONSTANT burst as one call: `count` big-endian words straight from the FIFO,
+// the first at word `first` of the method range (renderer_method for each would do the same).
+void renderer_constants(u32 first, const u8* be_words, u32 count);
 void renderer_memory_written(u32 ea, u32 size);  // CPU-side transfer wrote guest memory
 // Guest-write collection for the renderer's caches: the FIFO put pointer read right before the
 // renderer's last collection of guest writes. Commands past it may read data written later, so

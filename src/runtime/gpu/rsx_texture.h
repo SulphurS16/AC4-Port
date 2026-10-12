@@ -42,4 +42,8 @@ struct TexData {
 // applied for 8-bit formats.
 bool convert_texture(const TexDesc& t, const u8* src, TexData* out);
 
+// Fast conversion paths (32-bit ARGB texels as byte permutations; on by default). ac4-textest
+// checks them against the per-texel path with this switched off.
+extern bool g_texture_fast_paths;
+
 }  // namespace rt::gpu

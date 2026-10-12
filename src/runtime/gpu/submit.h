@@ -46,6 +46,9 @@ class Recorder {
   // `bytes` of `data` are copied (the whole update: row pitch x rows x depth for textures).
   void UpdateSubresource(ID3D11Resource* r, UINT sub, const D3D11_BOX* box, const void* data, UINT row_pitch, UINT depth_pitch,
                          size_t bytes);
+  // Part of a constant buffer: `bytes` at byte `offset`. Only the part is recorded; the executing
+  // side patches its own copy of the whole buffer and uploads it whole (plain UpdateSubresource).
+  void UpdateConstants(ID3D11Buffer* b, u32 offset, u32 bytes, const void* data);
   // Map (WRITE_DISCARD or WRITE_NO_OVERWRITE), copy `bytes` to `offset`, Unmap (dynamic buffers).
   void write_buffer(ID3D11Buffer* b, D3D11_MAP mode, u32 offset, const void* data, u32 bytes);
   // Room for `bytes` that write_buffer would copy, filled by the caller before the next call

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -519,6 +520,7 @@ void fifo_thread() {
   auto* ctrl_put = reinterpret_cast<volatile u32*>(ppu::mem() + kControlAddr);
   auto* ctrl_get = reinterpret_cast<volatile u32*>(ppu::mem() + kControlAddr + 4);
   u32 get = __builtin_bswap32(*ctrl_get);
+  const bool trace_methods = cfg().trace_rsx > 0;  // --trace-rsx logs every method: no burst shortcuts
   std::vector<u32> call_stack;
   u32 idle = 0;
   u64 idle_since = 0;
@@ -563,9 +565,32 @@ void fifo_thread() {
       } else {
         u32 args_io = get + 4;
         get += 4 + 4 * count;
-        for (u32 i = 0; i < count; ++i) {
-          u32 m = noinc ? method : method + 4 * i;
-          execute_method(m >> 2, fifo_read(args_io + 4 * i), count, i);
+        // Arguments in one IO page (all but commands crossing a 1 MiB boundary): one translation.
+        const u8* args = nullptr;
+        u32 args_ea;
+        if (count && (args_io >> 20) == ((args_io + 4 * count - 4) >> 20) && io_to_ea(args_io, &args_ea))
+          args = ppu::mem() + args_ea;
+        if (args && inc && method >= m::SET_TRANSFORM_CONSTANT && method + 4 * count <= m::SET_TRANSFORM_CONSTANT + 0x80 &&
+            !trace_methods) {
+          // Vertex constants, the bulk of heavy scenes' methods: one call for the burst.
+          for (u32 i = 0; i < count; ++i) {
+            u32 v;
+            std::memcpy(&v, args + 4 * i, 4);
+            g.regs[(method >> 2) + i] = __builtin_bswap32(v);
+          }
+          renderer_constants((method - m::SET_TRANSFORM_CONSTANT) >> 2, args, count);
+        } else {
+          for (u32 i = 0; i < count; ++i) {
+            u32 m = noinc ? method : method + 4 * i;
+            u32 arg;
+            if (args) {
+              std::memcpy(&arg, args + 4 * i, 4);
+              arg = __builtin_bswap32(arg);
+            } else {
+              arg = fifo_read(args_io + 4 * i);
+            }
+            execute_method(m >> 2, arg, count, i);
+          }
         }
         bump(g.commands);
       }
