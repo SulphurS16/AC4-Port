@@ -59,6 +59,10 @@ inline u32 self_id() {
   return t ? t->id : 0xffffffffu;
 }
 
+// Diagnostics: logs guest sleeps and expired timed waits of 50 ms or more with the thread and
+// its caller (rate-limited): long load stalls are found this way.
+void note_long_wait(const char* what, u64 us);
+
 // Waits on cv until pred() with an LV2 timeout in microseconds (0 = forever).
 // Returns false on timeout (pred still false).
 template <typename Lock, typename Pred>
@@ -69,7 +73,9 @@ bool wait_us(std::condition_variable& cv, Lock& lk, u64 timeout_us, Pred pred) {
     cv.wait(lk, pred);
     return true;
   }
-  return cv.wait_for(lk, std::chrono::microseconds(timeout_us), pred);
+  bool ok = cv.wait_for(lk, std::chrono::microseconds(timeout_us), pred);
+  if (!ok) note_long_wait("timed wait expired after", timeout_us);
+  return ok;
 }
 
 // Mutex ownership with LV2 hand-off semantics. With SYS_SYNC_FIFO (1) or SYS_SYNC_PRIORITY (2,

@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <atomic>
 #include <ctime>
 
 #include "runtime/lv2/lv2.h"
@@ -40,6 +41,13 @@ void sleep_us(u64 us) {
   WaitForSingleObject(timer, INFINITE);
 }
 
+void note_long_wait(const char* what, u64 us) {
+  static std::atomic<u32> logged{0};
+  if (us < 50000 || logged.fetch_add(1) >= 300) return;
+  PpuThread* t = cur_thread();
+  LOG_I("wait", "%s %.1f ms: '%s' (lr 0x%08x)", what, us / 1000.0, t ? t->name.c_str() : "host", t ? u32(t->ctx.lr) : 0u);
+}
+
 namespace {
 
 void sys_ppu_thread_exit(u64 val) { thread_exit(val); }
@@ -69,10 +77,12 @@ s32 sys_ppu_thread_get_priority(u64 id, Ptr<bes32> prio) {
 }
 
 s32 sys_timer_usleep(u64 us) {
+  note_long_wait("sleep", us);
   sleep_us(us);
   return CELL_OK;
 }
 s32 sys_timer_sleep(u32 sec) {
+  note_long_wait("sleep", u64(sec) * 1000000);
   sleep_us(u64(sec) * 1000000);
   return CELL_OK;
 }
