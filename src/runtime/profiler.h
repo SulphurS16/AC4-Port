@@ -14,7 +14,9 @@ void register_thread(const std::string& name, void* handle);
 void unregister_thread(void* handle);
 // Snapshot of the registered threads (handle, name).
 std::vector<std::pair<void*, std::string>> threads();
-void start(const std::string& match);
+// match: threads to sample (profile.txt); stacks: threads whose whole call stacks are also recorded
+// (profile_stacks.txt; summarize with tools/profstack.py).
+void start(const std::string& match, const std::string& stacks);
 void write_report(const std::string& path);
 // Logs the CPU time (user + kernel) used so far by each registered thread, busiest first.
 void cpu_report();

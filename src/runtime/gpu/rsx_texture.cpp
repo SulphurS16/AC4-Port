@@ -265,6 +265,16 @@ u32 layout(const TexDesc& t, std::vector<LevelLayout>* out) {
 u32 texture_size(const TexDesc& t) { return layout(t, nullptr); }
 
 bool g_texture_fast_paths = true;
+bool g_texture_bc = true;
+
+// A DXT texture keeps its channels under this remap (each output component its own input, none
+// forced to 0 or 1): the GPU can sample its blocks as they are.
+bool dxt_remap_identity(u32 remap) {
+  if ((remap & 0xff) != 0xE4) return false;
+  for (int c = 0; c < 4; ++c)
+    if (((remap >> (8 + 2 * c)) & 3) < 2) return false;
+  return true;
+}
 
 bool convert_texture(const TexDesc& t, const u8* src, TexData* out) {
   std::vector<LevelLayout> levels;
@@ -284,6 +294,27 @@ bool convert_texture(const TexDesc& t, const u8* src, TexData* out) {
   u32 out_bpp = fl ? (t.format == 0x9A ? 8 : 16) : 4;
   out->format = !fl ? DXGI_FORMAT_R8G8B8A8_UNORM
                     : t.format == 0x9A ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
+  // DXT: the blocks are the PC's BC1/BC2/BC3 blocks (same byte order) and upload as they are: the
+  // GPU decodes them (4-8x less memory than decoded texels, no decoding here). Decoded here
+  // instead: a remap that moves or forces channels, volume textures, and top levels that are not
+  // whole blocks (D3D11 requires them for block-compressed textures).
+  if (dxt && g_texture_bc && dxt_remap_identity(t.remap) && t.dim != 3 && t.width % 4 == 0 && t.height % 4 == 0) {
+    out->format = t.format == 0x86 ? DXGI_FORMAT_BC1_UNORM : t.format == 0x87 ? DXGI_FORMAT_BC2_UNORM : DXGI_FORMAT_BC3_UNORM;
+    for (const LevelLayout& L : levels) {
+      u32 bw = (L.w + 3) / 4, bh = (L.h + 3) / 4;
+      TexData::Level o;
+      o.row_pitch = bw * bpu;
+      o.slice_pitch = o.row_pitch * bh;
+      o.data.resize(o.slice_pitch);
+      const u8* base = src + L.offset;
+      if (L.row_pitch == o.row_pitch)
+        std::memcpy(o.data.data(), base, o.slice_pitch);
+      else
+        for (u32 y = 0; y < bh; ++y) std::memcpy(o.data.data() + size_t(y) * o.row_pitch, base + size_t(y) * L.row_pitch, o.row_pitch);
+      out->levels.push_back(std::move(o));
+    }
+    return true;
+  }
   // Fast path for 32-bit ARGB texels (A8R8G8B8, D8R8G8B8: e.g. movie frames, 1280x720): the remap
   // is a byte permutation per texel (perm32): a copy for movie frames stored as RGBA (remap
   // 0xAA93), one rotation for plain ARGB. Swizzled layouts use per-level Morton tables: x and y

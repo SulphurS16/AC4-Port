@@ -81,6 +81,9 @@ int main(int argc, char** argv) {
     else if (a == "--trace-spu-limit" && i + 1 < argc) c.trace_spu_limit = unsigned(std::stoul(argv[++i]));
     else if (a == "--trace-spu-cats" && i + 1 < argc) c.trace_spu_cats = unsigned(std::stoul(argv[++i]));
     else if (a == "--profile") c.profile = next();
+    else if (a == "--profile-stacks") c.profile_stacks = next();
+    else if (a == "--verify-native") c.verify_native = true;
+    else if (a == "--texture-bc") c.texture_bc = next() != "off";
     else if (a == "--spu-collect") c.spu_collect = true;
     else if (a == "--spu-interp") c.spu_interp = true;
     else if (a == "--trace-rsx") c.trace_rsx = unsigned(std::stoul(next()));
@@ -142,7 +145,7 @@ int main(int argc, char** argv) {
     if (q == std::string::npos) break;
     p = q + 1;
   }
-  prof::start(c.profile);
+  prof::start(c.profile, c.profile_stacks);
   LOG_I("main", "run dir %s", c.run_dir.c_str());
   if (!c.watch_access.empty() && !datawatch::configure(c.watch_access)) return 2;
   set_fatal_hook([] {

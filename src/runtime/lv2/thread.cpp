@@ -4,6 +4,9 @@
 
 #include <atomic>
 #include <ctime>
+#include <map>
+#include <mutex>
+#include <string>
 
 #include "runtime/lv2/lv2.h"
 
@@ -41,11 +44,22 @@ void sleep_us(u64 us) {
   WaitForSingleObject(timer, INFINITE);
 }
 
+// Logs the first 3 per thread and call site (periodic sleepers such as the game's
+// KeepPresentScreenThread, 500 ms per iteration, would fill the log), at most 300 lines.
 void note_long_wait(const char* what, u64 us) {
   static std::atomic<u32> logged{0};
-  if (us < 50000 || logged.fetch_add(1) >= 300) return;
+  static std::mutex mu;
+  static std::map<std::pair<std::string, u32>, u32> seen;
+  if (us < 50000 || logged.load(std::memory_order_relaxed) >= 300) return;
   PpuThread* t = cur_thread();
-  LOG_I("wait", "%s %.1f ms: '%s' (lr 0x%08x)", what, us / 1000.0, t ? t->name.c_str() : "host", t ? u32(t->ctx.lr) : 0u);
+  std::string name = t ? t->name : "host";
+  u32 lr = t ? u32(t->ctx.lr) : 0u;
+  {
+    std::lock_guard lk(mu);
+    if (++seen[{name, lr}] > 3) return;
+  }
+  logged.fetch_add(1);
+  LOG_I("wait", "%s %.1f ms: '%s' (lr 0x%08x)", what, us / 1000.0, name.c_str(), lr);
 }
 
 namespace {

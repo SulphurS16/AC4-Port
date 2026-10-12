@@ -39,11 +39,15 @@ struct TexData {
 };
 
 // Converts the texture at `src` (texture_size(t) bytes) for upload. Channel remap (CONTROL1) is
-// applied for 8-bit formats.
+// applied for 8-bit formats; DXT stays compressed (BC formats) when g_texture_bc allows.
 bool convert_texture(const TexDesc& t, const u8* src, TexData* out);
 
 // Fast conversion paths (32-bit ARGB texels as byte permutations; on by default). ac4-textest
 // checks them against the per-texel path with this switched off.
 extern bool g_texture_fast_paths;
+// DXT textures upload as BC1-BC3 blocks when their remap keeps the channels (--texture-bc, on by
+// default); otherwise they are decoded to RGBA8 here.
+extern bool g_texture_bc;
+bool dxt_remap_identity(u32 remap);
 
 }  // namespace rt::gpu

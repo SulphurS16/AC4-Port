@@ -1015,6 +1015,10 @@ ID3D11ShaderResourceView* texture_view(const gpu::TexDesc& t, float* scale) {
     warn_once("tex-cvt-" + std::to_string(t.format), "texture conversion failed: " + data.error);
     return nullptr;
   }
+  if ((t.format == 0x86 || t.format == 0x87 || t.format == 0x88) && data.format == DXGI_FORMAT_R8G8B8A8_UNORM && gpu::g_texture_bc)
+    warn_once(ac4::strprintf("dxt-cpu-%x-%x-%u", t.format, t.remap, t.dim),
+              ac4::strprintf("DXT texture decoded on the CPU (format 0x%02x, remap 0x%04x, %ux%u, dimension %u)", t.format, t.remap,
+                             t.width, t.height, t.dim));
   // Same shape as the host texture of a dynamic entry: update it in place, in command order. The
   // converted levels move into the recorded call (no copy into the recorder: movie frames).
   if (e.dynamic && e.tex && e.w == data.width && e.h == data.height && e.d == data.depth && e.mips == data.mips &&
@@ -2387,6 +2391,7 @@ void renderer_thread_init() {
     return;
   }
   gpu::submit_init(cfg().gpu_submit_thread);
+  gpu::g_texture_bc = cfg().texture_bc;
   auto* dev = device().dev;
   ID3DBlob* vs = gpu::compile_hlsl(kClearHlsl, "vs_main", "vs_5_0");
   ID3DBlob* ps = gpu::compile_hlsl(kClearHlsl, "ps_main", "ps_5_0");

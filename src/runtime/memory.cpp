@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -60,6 +61,20 @@ size_t g_freed_next = 0;
 std::string origin_text(const Origin& o) {
   return ac4::strprintf("%.3f s by '%s' (guest backtrace%s)", o.t, o.thread.c_str(), o.backtrace.c_str());
 }
+// Committed guest pages, one bit per 4 KiB page, kept by commit()/decommit(): committed() answers
+// from here. (VirtualQuery takes time in proportion to the region it describes: ~0.2 ms per call
+// on the game's large blocks, called by per-frame hooks.)
+std::atomic<u64> g_pages[(0x100000000ull >> 12) / 64];
+void mark_pages(u64 a, u64 e, bool on) {  // [a, e), page-aligned
+  for (u64 p = a >> 12; p < (e >> 12); ++p) {
+    u64 bit = 1ull << (p & 63);
+    if (on)
+      g_pages[p >> 6].fetch_or(bit, std::memory_order_relaxed);
+    else
+      g_pages[p >> 6].fetch_and(~bit, std::memory_order_relaxed);
+  }
+}
+
 const char* area_name(int i) {
   static const char* n[] = {"main", "user64k", "user1m", "mmapper", "video", "stack", "spu"};
   return n[i];
@@ -103,22 +118,21 @@ void commit(u32 addr, u32 size) {
   u64 a = addr & ~0xfffull, e = (u64(addr) + size + 0xfff) & ~0xfffull;
   if (!VirtualAlloc(base() + a, size_t(e - a), MEM_COMMIT, PAGE_READWRITE))
     fatal(ac4::strprintf("guest commit failed at 0x%08x size 0x%x (error %lu)", addr, size, GetLastError()));
+  mark_pages(a, e, true);
 }
 
 void decommit(u32 addr, u32 size) {
   if (!size) return;
   u64 a = (u64(addr) + 0xfff) & ~0xfffull, e = (u64(addr) + size) & ~0xfffull;
-  if (e > a) VirtualFree(base() + a, size_t(e - a), MEM_DECOMMIT);
+  if (e <= a) return;
+  mark_pages(a, e, false);
+  VirtualFree(base() + a, size_t(e - a), MEM_DECOMMIT);
 }
 
 bool committed(u32 addr, u32 size) {
-  u64 a = addr, e = u64(addr) + (size ? size : 1);
-  while (a < e) {
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (!VirtualQuery(base() + a, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT) return false;
-    u64 region_end = u64(reinterpret_cast<u8*>(mbi.BaseAddress) - base()) + mbi.RegionSize;
-    a = region_end;
-  }
+  u64 e = (u64(addr) + (size ? size : 1) + 0xfff) >> 12;
+  for (u64 p = addr >> 12; p < e; ++p)
+    if (!((g_pages[p >> 6].load(std::memory_order_relaxed) >> (p & 63)) & 1)) return false;
   return true;
 }
 

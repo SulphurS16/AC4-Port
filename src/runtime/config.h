@@ -24,12 +24,15 @@ struct Config {
   bool headless = false;
   double shot_interval = 0;  // seconds between automatic PNG captures (0 = off)
   bool lenient = false;      // survey mode: unimplemented calls return 0 (never for evidence)
+  bool verify_native = false;  // native leaf hooks (game/native_hooks.cpp) also run the original and compare
+  bool texture_bc = true;      // DXT textures upload as BC blocks (--texture-bc off: decoded to RGBA8)
   std::string trace_spu;     // SPU thread name to trace (MFC, mailboxes, events, stops)
   unsigned trace_spu_limit = 4000;  // maximum number of traced SPU operations
   unsigned trace_spu_cats = 7;      // 1 = MFC/atomics, 2 = channels, 4 = events/stops/group
   double profile_at = 0;            // start sampling at this time (seconds)
   double profile_split = 0;         // samples after this time go to profile_late.txt (0 = off)
   std::string profile;              // sample host threads whose name contains this (profile.txt)
+  std::string profile_stacks;       // ... and record the call stacks of these (profile_stacks.txt)
   bool spu_collect = false;         // record SPU code without a recompiled version (training run)
   bool spu_interp = false;          // never use recompiled SPU code (diagnostics)
   unsigned trace_rsx = 0;           // log the first N RSX FIFO methods

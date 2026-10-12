@@ -12,3 +12,6 @@
 0x00d88e78 setjmp           # guest setjmp: its call sites may return twice (recompiler; runtime/guest_setjmp.cpp)
 0x00d88f9c longjmp          # guest longjmp: back to the live setjmp call (Lua script errors; runtime/guest_setjmp.cpp)
 0x002b12dc lua_throw        # Lua 5.0 luaD_throw(L, status): logs script errors (game/lua_hooks.cpp)
+0x004ddddc name_compare     # case-insensitive name compare (stack copies, lowercase, strcmp): native (game/native_hooks.cpp)
+0x0054a648 pair_find        # pair lookup in a table of 8-byte entries, (A,B) -> 2, (B,A) -> 1: native (game/native_hooks.cpp)
+0x0095c848 arena_alloc      # draw-data arena allocator (0x30000 16-byte units, counter at +0x300000, unchecked): high-water/overflow log (game/frame_hooks.cpp)
