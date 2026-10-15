@@ -25,6 +25,11 @@ struct Resolved {
 // Returns false for paths outside every mount point (or escaping one with "..").
 bool resolve(const std::string& guest_path, Resolved& out);
 
+// A disc file served from another host file: the port's own copy of it (the SYSTEM menu archive
+// with the PC SETTINGS row, game/system_menu.cpp). `disc_relative` is below the disc root
+// ("PS3_GAME/USRDIR/..."); the disc itself is never written.
+void replace(const std::string& disc_relative, const std::string& host);
+
 // File descriptors shared by cellFs* and sys_fs_* syscalls.
 struct Stat {
   bool is_dir = false;

@@ -112,7 +112,7 @@ std::string key_label(u32 code) {
 
 // Screen state. The window thread changes it (input, controller polling); the presenting thread
 // draws a copy; the pad module reads the controller mode.
-enum class State { Closed, Open, Closing };
+enum class State { Closed, Open };
 std::recursive_mutex g_mu;
 std::atomic<State> g_state{State::Closed};
 std::atomic<bool> g_open_request{false};
@@ -126,16 +126,6 @@ int g_client_w = 1280, g_client_h = 720;
 bool g_drag_slider = false;
 std::atomic<u16> g_suppress[4];
 u16 g_pad_held = 0;  // controller buttons held during the last poll (window thread)
-
-// The install question the game shows behind the screen: answered with Circle once the screen
-// closes, but not before the question can take it.
-constexpr double kQuestionReady = 1.0, kPressTime = 0.15, kAfterPress = 0.3;
-Clock::time_point g_task_started;
-std::atomic<s64> g_cancel_from{0}, g_cancel_to{0}, g_closed_at{0};  // steady-clock ticks
-s64 ticks(Clock::time_point t) { return t.time_since_epoch().count(); }
-Clock::time_point after(Clock::time_point t, double seconds) {
-  return t + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));
-}
 
 std::vector<Row> build_rows(int page) {
   std::vector<Row> rows;
@@ -251,7 +241,7 @@ std::vector<Row> build_rows(int page) {
       gpu::window_client_size(&cw, &ch);
       double fit_h = std::min(double(ch), double(cw) * 9.0 / 16.0) * d.render_scale / 100.0;
       long rh = std::lround(std::clamp(fit_h, 360.0, 2880.0)), rw = std::lround(double(rh) * 16.0 / 9.0);
-      rs.value_note = ac4::strprintf("%d %%   %ld x %ld", d.render_scale, rw, rh);
+      rs.value_note = ac4::strprintf("%d%%  %ldx%ld", d.render_scale, rw, rh);
     }
     rows.push_back(rs);
   } else {
@@ -500,12 +490,7 @@ void close_locked() {
   if (g_state != State::Open) return;
   g_capturing = false;
   for (auto& s : g_suppress) s = g_pad_held;  // the closing press stays with the screen
-  // The install question behind the screen takes a Circle press, then the screen goes away.
-  auto from = std::max(after(Clock::now(), 0.05), after(g_task_started, kQuestionReady));
-  g_cancel_from = ticks(from);
-  g_cancel_to = ticks(after(from, kPressTime));
-  g_closed_at = ticks(after(from, kPressTime + kAfterPress));
-  g_state = State::Closing;
+  g_state = State::Closed;  // back to the SYSTEM menu, its PC SETTINGS row still chosen
   if (g_restore_capture) gpu::window_set_mouse_capture(true);
   LOG_I("ui", "PC SETTINGS closed");
 }
@@ -662,19 +647,7 @@ void load_xinput() {
 bool is_open() { return g_state.load(std::memory_order_relaxed) != State::Closed; }
 
 void open_from_menu() {
-  g_task_started = Clock::now();
   g_open_request = true;  // opened on the window thread (tick)
-}
-
-void decline_install() {
-  std::lock_guard<std::recursive_mutex> lk(g_mu);
-  if (g_state != State::Closed) return;
-  g_task_started = Clock::now();
-  auto from = after(g_task_started, kQuestionReady);
-  g_cancel_from = ticks(from);
-  g_cancel_to = ticks(after(from, kPressTime));
-  g_closed_at = ticks(after(from, kPressTime + kAfterPress));
-  g_state = State::Closing;  // as when the screen closes: black while the question is answered
 }
 
 void close() {
@@ -682,13 +655,7 @@ void close() {
   close_locked();
 }
 
-PadMode pad_mode() {
-  State s = g_state.load(std::memory_order_relaxed);
-  if (s == State::Closed) return PadMode::Normal;
-  if (s == State::Open) return PadMode::Idle;
-  s64 now = ticks(Clock::now());
-  return now >= g_cancel_from.load() && now < g_cancel_to.load() ? PadMode::Cancel : PadMode::Idle;
-}
+PadMode pad_mode() { return g_state.load(std::memory_order_relaxed) == State::Closed ? PadMode::Normal : PadMode::Idle; }
 
 bool on_key(u32 vk, bool down, bool repeat) {
   std::lock_guard<std::recursive_mutex> lk(g_mu);
@@ -820,12 +787,7 @@ void tick() {
     update_client_size();
     if (g_state == State::Closed) open_locked();
   }
-  State st = g_state.load();
-  if (st == State::Closed) return;
-  if (st == State::Closing) {
-    if (ticks(Clock::now()) >= g_closed_at.load()) g_state = State::Closed;
-    return;
-  }
+  if (g_state.load() == State::Closed) return;
   if (!g_xinput_loaded) load_xinput();
   u16 buttons = 0;
   float lx = 0, ly = 0;
@@ -1023,7 +985,7 @@ void triangle(float cx, float cy, float dx, float dy, float g) {
 struct Snapshot {
   std::vector<Row> rows;
   int page = 0, focus = 0, slot = 0, scroll = 0;
-  bool capturing = false, closing = false;
+  bool capturing = false;
   std::string toast;
 };
 
@@ -1034,7 +996,6 @@ void draw(const Snapshot& s, u32 w, u32 h) {
   dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
   color(0);  // a page of its own, as the game's settings screens
   dc->FillRectangle(D2D1::RectF(0, 0, float(w), float(h)), g_gfx.brush);
-  if (s.closing) return;  // black while the install question behind it is answered
   Canvas c = canvas_for(int(w), int(h));
   dc->SetTransform(D2D1::Matrix3x2F::Scale(c.scale, c.scale) * D2D1::Matrix3x2F::Translation(c.ox, c.oy));
 
@@ -1073,7 +1034,7 @@ void draw(const Snapshot& s, u32 w, u32 h) {
       triangle(kArrowR, ym, 1, 0, r.enabled && r.index + 1 < int(r.options.size()) ? 0.6f : 0.25f);
       if (r.index >= 0 && r.index < int(r.options.size())) text(r.options[size_t(r.index)], g_gfx.value, kBarL, y0, kBarR, y1, g);
     } else if (r.kind == Kind::Slider) {
-      text(r.value_note, g_gfx.value, 336, y0, 440, y1, 0.8f);
+      text(r.value_note, g_gfx.small, 330, y0, kArrowL - 14, y1, 0.8f);  // "100%  2560x1440" fits
       triangle(kArrowL, ym, -1, 0, 0.6f);
       triangle(kArrowR, ym, 1, 0, 0.6f);
       float f = float((r.value - r.lo) / (r.hi - r.lo));
@@ -1128,9 +1089,7 @@ void render(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* backbu
   Snapshot s;
   {
     std::lock_guard<std::recursive_mutex> lk(g_mu);
-    State st = g_state.load();
-    if (st == State::Closed) return;
-    s.closing = st == State::Closing;
+    if (g_state.load() == State::Closed) return;
     s.rows = g_rows;
     s.page = g_page;
     s.focus = g_focus;
@@ -1139,7 +1098,7 @@ void render(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* backbu
     s.capturing = g_capturing;
     if (!g_toast.empty() && Clock::now() < g_toast_until) s.toast = g_toast;
   }
-  if (s.rows.empty() && !s.closing) return;
+  if (s.rows.empty()) return;
   ID3D11DeviceContext1* ctx1 = nullptr;
   if (FAILED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1)))) return;
   ID3DDeviceContextState* prev = nullptr;

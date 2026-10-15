@@ -11,7 +11,6 @@
 #include <atomic>
 #include <mutex>
 
-#include "runtime/game/pc_settings_entry.h"
 #include "runtime/gpu/display.h"
 
 namespace rt::game {
@@ -43,7 +42,6 @@ void thread_started(const std::string& name) {
     (name == "FcsManager" ? g_fcs : g_sorties)++;
     update();
   }
-  pc_settings_thread_started(name);
 }
 
 void thread_exited(const std::string& name) {

@@ -29,6 +29,7 @@
 #include "ppu/ppu_recomp.h"
 #include "runtime/config.h"
 #include "runtime/game/frame_policy.h"
+#include "runtime/game/system_menu.h"
 #include "runtime/gpu/window.h"
 #include "runtime/input.h"
 #include "runtime/log.h"
@@ -166,10 +167,31 @@ bool probe_manager(Ctx& ctx, u32 mgr) {
   return true;
 }
 
+// A decide key (Cross sends 0x5801, then 0x5818) for the SYSTEM menu's PC SETTINGS row (the
+// focus of the manager's top dialog; system_menu.cpp): the port's screen opens instead.
+bool pc_settings_chosen(u32 mgr, u32 msg) {
+  if (!valid(msg, 8) || ppu::r32(msg) != kKeyMessage) return false;
+  u32 code = ppu::r32(msg + 4);
+  if ((code != 0x5801 && code != 0x5818) || !valid(mgr + kMgrTableCount)) return false;
+  u32 depth = ppu::r32(mgr + kMgrDepth);
+  if (depth == 0 || depth > 32) return false;
+  u32 top = ppu::r32(mgr + kMgrStack + 4 * (depth - 1));
+  u32 focus = valid(top + kDlgFocus) ? ppu::r32(top + kDlgFocus) : 0;
+  return valid(focus + kObjId) && ppu::r32(focus + kObjId) == kPcSettingsButton;
+}
+
 void dispatch_hook(Ctx& ctx, void (*orig)(Ctx&)) {
   u32 msg = u32(ctx.r[4]);
   if (is_probe(msg)) {
     ctx.r[3] = probe_manager(ctx, u32(ctx.r[3])) ? 1 : 0;  // 1: the routing stops here
+    return;
+  }
+  if (pc_settings_chosen(u32(ctx.r[3]), msg)) {
+    if (ppu::r32(msg + 4) == 0x5801) {
+      LOG_I("game", "SYSTEM menu: PC SETTINGS chosen");
+      ui::open_from_menu();
+    }
+    ctx.r[3] = 1;  // taken: the game never sees a decide key on the added row
     return;
   }
   orig(ctx);

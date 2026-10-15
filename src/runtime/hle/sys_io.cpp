@@ -182,10 +182,6 @@ s32 cellPadGetData(u32 port, Ptr<PadData> data) {
   if (sysdlg::active() || ui_mode != ui::PadMode::Normal) {  // a system dialog or PC SETTINGS holds the controller: the game sees it at rest
     PadState idle;
     idle.connected = true;
-    if (ui_mode == ui::PadMode::Cancel && !sysdlg::active() && port == 0) {  // PC SETTINGS closed: the install question gets CANCEL
-      idle.d2 = CIRCLE;
-      idle.press[5] = 255;
-    }
     s = idle;
   }
   u16 b[24] = {};

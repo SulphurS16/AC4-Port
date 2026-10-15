@@ -3,6 +3,7 @@
 
 #include "common/file.h"
 #include "runtime/config.h"
+#include "runtime/game/system_menu.h"
 #include "runtime/hle.h"
 #include "runtime/log.h"
 #include "runtime/vfs.h"
@@ -47,6 +48,9 @@ static void install_update_data() {
 void lv2_init() {
   vfs::init(cfg().disc_root, cfg().hdd0, cfg().hdd1, cfg().flash, cfg().saves, cfg().test_overlay);
   ac4::add_protected_root(cfg().flash);
+  // The SYSTEM menu with its PC SETTINGS row (the port's copy of the menu's archive).
+  if (std::string menu = game::system_menu_archive(cfg().disc_root, cfg().data_dir); !menu.empty())
+    vfs::replace(game::kSystemMenuArchive, menu);
   install_update_data();
   LOG_I("lv2", "lv2 initialized");
 }

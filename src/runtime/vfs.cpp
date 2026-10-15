@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cctype>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -25,6 +26,13 @@ struct Mount {
 std::vector<Mount> g_mounts;
 fs::path g_disc, g_overlay;  // test overlay over the disc (vfs.h)
 std::mutex g_overlay_mu;
+std::map<std::string, fs::path> g_replaced;  // disc-relative path (lower case, '/') -> host file (vfs.h)
+
+std::string lower_generic(const fs::path& p) {
+  std::string s = p.generic_string();
+  for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return s;
+}
 std::set<std::string> g_overlaid;  // logged once each
 
 struct File {
@@ -126,6 +134,10 @@ bool resolve(const std::string& gp, Resolved& out) {
     h /= fs::path(std::u8string(parts[k].begin(), parts[k].end()));  // guest paths are UTF-8
   }
   out = {h, best->writable, best->prefix};
+  if (!g_replaced.empty() && !best->writable && (best->prefix == "/dev_bdvd" || best->prefix == "/app_home")) {
+    auto it = g_replaced.find(lower_generic(h.lexically_relative(g_disc)));
+    if (it != g_replaced.end()) out.host = it->second;
+  }
   if (!g_overlay.empty() && !best->writable && (best->prefix == "/dev_bdvd" || best->prefix == "/app_home")) {
     std::error_code ec;
     fs::path rel = h.lexically_relative(g_disc);
@@ -137,6 +149,11 @@ bool resolve(const std::string& gp, Resolved& out) {
     }
   }
   return true;
+}
+
+void replace(const std::string& disc_relative, const std::string& host) {
+  g_replaced[lower_generic(fs::path(disc_relative))] = fs::path(host);
+  LOG_I("vfs", "%s is served from %s", disc_relative.c_str(), host.c_str());
 }
 
 static s32 resolve_for(const std::string& path, bool want_write, Resolved& r) {
