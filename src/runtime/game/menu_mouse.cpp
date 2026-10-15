@@ -53,6 +53,7 @@ constexpr u32 kMenuSetPanel = 0x00e78c88;
 constexpr u32 kDlgBusy = 64;      // dialog vtable: nonzero while it takes no input [+72]
 constexpr u32 kDlgSetFocus = 44;  // dialog vtable: SetFocus(dialog, object) [+48]
 constexpr u32 kDlgChildren = 24, kDlgChildCount = 28, kDlgFocus = 128;
+constexpr u32 kDlgRect = 136;  // the dialog on screen (floats l, t, r, b); its objects' rects are relative to it
 constexpr u32 kObjId = 4;          // -1: an unnamed part
 constexpr u32 kObjFocusable = 52;  // object vtable: focusable [+56]
 constexpr u32 kObjRect = 56;       // object vtable: rect (left, top, right, bottom) by hidden pointer [+52]
@@ -247,6 +248,13 @@ Rect rect_by(Ctx& ctx, u32 obj, u32 slot) {
 }
 Rect rect_of(Ctx& ctx, u32 obj) { return rect_by(ctx, obj, kObjRect); }
 
+// Picture coordinates -> the dialog's own (a pop-up's objects are placed relative to its corner).
+void local(u32 dialog, float* x, float* y) {
+  if (!valid(dialog + kDlgRect + 8)) return;
+  *x -= float(ppu::rf32(dialog + kDlgRect));
+  *y -= float(ppu::rf32(dialog + kDlgRect + 4));
+}
+
 bool is_class(u32 obj, u32 cls) {
   u32 vt = valid(obj) ? ppu::r32(obj) : 0;
   return valid(vt + kObjClass) && ppu::r32(vt + kObjClass) == cls;
@@ -296,6 +304,7 @@ u32 object_at(Ctx& ctx, u32 dialog, float gx, float gy, u32* slider = nullptr) {
   if (slider) *slider = 0;
   u32 arr = ppu::r32(dialog + kDlgChildren), n = ppu::r32(dialog + kDlgChildCount);
   if (n == 0 || n > 1024 || !valid(arr, 4 * n)) return 0;
+  local(dialog, &gx, &gy);
   u32 best = 0;
   int best_rank = -1;
   float best_area = 0;
@@ -444,11 +453,13 @@ void frame(Ctx& ctx) {
       call(ctx, vfunc(dialog, kDlgSetFocus), dialog, hit);
     }
     if (hit && is_list(hit)) {
-      row = list_row_at(ctx, hit, gx, gy, &row_safe);
+      float lx = gx, ly = gy;
+      local(dialog, &lx, &ly);
+      row = list_row_at(ctx, hit, lx, ly, &row_safe);
       // Hover selects rows that do not scroll the list; after a scroll the cursor has to move a
       // row's height before hover selects again (no runaway scrolling under a resting cursor).
       static float scrolled_y = -1e9f;
-      if (row >= 0 && row_safe && !down && std::fabs(gy - scrolled_y) > 40 && list_select(ctx, hit, row)) scrolled_y = gy;
+      if (row >= 0 && row_safe && !down && std::fabs(ly - scrolled_y) > 40 && list_select(ctx, hit, row)) scrolled_y = ly;
     }
   }
   s64 t = now_ms();
@@ -469,7 +480,11 @@ void frame(Ctx& ctx) {
       for (int i = 0; i < std::abs(e.value); ++i, t += 90) press(e.value > 0 ? kUp : kDown, 0, t);
     }
   }
-  if (g_drag.slider) drive_slider(gx);
+  if (g_drag.slider) {
+    float lx = gx, ly = gy;
+    local(dialog, &lx, &ly);
+    drive_slider(lx);
+  }
 }
 
 }  // namespace
