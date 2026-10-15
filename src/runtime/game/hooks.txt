@@ -24,3 +24,6 @@
 0x005de614 menu_dispatch_v  # the same with the message by value (SYSTEM and others: scene +1228 managers; menu_mouse.cpp)
 0x00640e98 menu_object      # a scene menu object: a key straight to one of its two dialogs (+272/+276 by +284; menu_mouse.cpp)
 0x006a19a0 menu_dialog_key  # a dialog's base key handler (to its focus object +36): any other route ends here (stops the probe; menu_mouse.cpp)
+0x009fc210 ac_turn_input      # an AC's turn input, every frame (r3 controller, r4 input): the player's turn object for mouse look (input_hooks.cpp)
+0x009fc364 ac_turn_input_b    # the same while the turn command is not zero
+0x00b656b8 ac_turn_update     # an AC body's yaw rate (body +484) from the frame's turn input (r3 turn object): mouse look turns here (input_hooks.cpp)
