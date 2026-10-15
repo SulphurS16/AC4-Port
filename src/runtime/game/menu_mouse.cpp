@@ -85,6 +85,7 @@ s64 now_ms() {
 
 std::atomic<int> g_context{int(InputContext::Screen)};
 std::atomic<s64> g_mouse_at{0}, g_pad_at{0};  // last use of each (ms)
+std::atomic<s64> g_key_at{0};                 // last key pressed in a menu (hides the cursor, not mouse look)
 std::atomic<bool> g_cursor{false};             // menu cursor shown (window thread reads)
 
 // Mouse events from the window thread, handled on the game's main thread at its next frame.
@@ -393,15 +394,16 @@ void frame(Ctx& ctx) {
   bool menu = dialog && valid(dialog + kDlgFocus) && ppu::r32(dialog + kDlgFocus) != 0;
   InputContext c = menu ? InputContext::Menu : mission_running() ? InputContext::Gameplay : InputContext::Screen;
   InputContext was = InputContext(g_context.exchange(int(c)));
-  bool mouse = g_mouse_at.load() > g_pad_at.load();
+  bool mouse = g_mouse_at.load() > std::max(g_pad_at.load(), g_key_at.load());
   bool focus = input_has_focus();
   bool show = c == InputContext::Menu && mouse && focus;
-  if (c != was || show != g_cursor.load()) {
+  if (bool before = g_cursor.load(); c != was || show != before) {
     g_cursor = show;
     if (c != was) LOG_I("input", "input context %s", c == InputContext::Menu ? "menu" : c == InputContext::Gameplay ? "gameplay" : "screen");
-    // Mouse look takes the mouse in gameplay; menus give it back.
-    if (c == InputContext::Menu && was == InputContext::Gameplay) gpu::window_request_mouse_capture(false);
-    else if (c == InputContext::Gameplay) gpu::window_request_mouse_capture(true);
+    // Mouse look takes the mouse in gameplay; everything else gives it back (menus, the mission's
+    // report, movies, loading).
+    if (c == InputContext::Gameplay && was != InputContext::Gameplay) gpu::window_request_mouse_capture(true);
+    else if (c != InputContext::Gameplay && was == InputContext::Gameplay) gpu::window_request_mouse_capture(false);
     gpu::window_refresh_cursor();
   }
   std::deque<Event> events;
@@ -503,7 +505,10 @@ void frame(Ctx& ctx) {
 
 InputContext input_context() { return InputContext(g_context.load(std::memory_order_relaxed)); }
 
-void menu_mouse_moved() { g_mouse_at = now_ms(); }
+void menu_mouse_moved() {
+  g_mouse_at = now_ms();
+  if (input_context() == InputContext::Menu && input_has_focus()) g_cursor = true;  // at once; frame() agrees
+}
 
 void menu_mouse_button(int button, bool down) {
   g_mouse_at = now_ms();
@@ -530,6 +535,11 @@ void note_pad_input() {
     g_cursor = false;  // the controller took over: the cursor hides at once
     gpu::window_refresh_cursor();
   }
+}
+
+void note_menu_key() {
+  g_key_at = now_ms();
+  if (g_cursor.exchange(false)) gpu::window_refresh_cursor();  // the keys took over until the mouse moves
 }
 
 void menu_pad_bits(u16* d1, u16* d2) {

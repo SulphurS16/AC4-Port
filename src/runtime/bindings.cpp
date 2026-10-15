@@ -246,6 +246,7 @@ PadOut sample() {
     // Start with Cross at once would open the title's menu and choose its first entry in the same
     // moment (LOAD GAME: straight to the save list); Cross comes later, when no menu opened.
     if (where == game::InputContext::Screen && in_menu(CROSS, code) && !game::movie_playing()) game::cross_after_start();
+    if (where == game::InputContext::Menu && code < kMouse) game::note_menu_key();  // keys, not the mouse's buttons
     return where;
   };
   held.erase(std::remove_if(held.begin(), held.end(), [&](const auto& h) { return !down(h.first); }), held.end());

@@ -493,6 +493,7 @@ void close_locked() {
   for (auto& s : g_suppress) s = g_pad_held;  // the closing press stays with the screen
   g_state = State::Closed;  // back to the SYSTEM menu, its PC SETTINGS row still chosen
   if (g_restore_capture) gpu::window_set_mouse_capture(true);
+  gpu::window_refresh_cursor();  // the menu's cursor rules again
   LOG_I("ui", "PC SETTINGS closed");
 }
 

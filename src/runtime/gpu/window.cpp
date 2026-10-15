@@ -6,10 +6,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
 
+#include "runtime/config.h"
 #include "runtime/game/menu_mouse.h"
 #include "runtime/gpu/d3d11_device.h"
 #include "runtime/gpu/input_hooks.h"
@@ -30,6 +32,9 @@ std::atomic<bool> g_fullscreen{false};  // borderless fullscreen (set_fullscreen
 // F1 gave the mouse back in gameplay: mouse look waits for a click into the game, F1 again or the
 // next stretch of gameplay (window thread).
 bool g_user_released = false;
+// The pointer's last screen position (window thread): Windows also sends WM_MOUSEMOVE when a window
+// appears or moves under a resting pointer; only real moves count as using the mouse.
+POINT g_pointer{LONG_MIN, LONG_MIN};
 
 void clip_cursor() {
   if (input_isolated()) return;  // test runs leave the real cursor alone
@@ -127,8 +132,10 @@ HCURSOR make_menu_cursor(UINT dpi) {
   return c ? c : LoadCursorW(nullptr, IDC_ARROW);
 }
 
-// The cursor over the client area: hidden while mouse look has it, the menu cursor in the game's
-// menus, otherwise hidden when the window fills the screen and the arrow in a window.
+// The cursor over the client area: the menu cursor in the game's menus once the mouse moved there
+// (until a key or a controller takes over) and in PC SETTINGS; the arrow in gameplay after F1 gave
+// the mouse back; none otherwise, in every window mode: mouse look, the title, movies, cutscenes,
+// loading screens, a menu driven by keys or a controller.
 HCURSOR client_cursor() {
   if (g_mouse_captured && !input_isolated()) return nullptr;
   if (game::menu_cursor_visible() || ui::is_open()) {
@@ -141,8 +148,8 @@ HCURSOR client_cursor() {
     }
     return cur;
   }
-  if (game::input_context() == game::InputContext::Menu) return nullptr;  // a controller drives the menu
-  return g_fullscreen ? nullptr : LoadCursorW(nullptr, IDC_ARROW);
+  if (g_user_released && game::input_context() == game::InputContext::Gameplay) return LoadCursorW(nullptr, IDC_ARROW);
+  return nullptr;
 }
 
 void refresh_cursor() {
@@ -321,14 +328,16 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE: {
       if (overlay) ui::on_mouse_move(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
-      static LPARAM last = -1;  // Windows repeats the position on other changes: real moves only
-      if (!overlay && !g_mouse_captured && lp != last && !input_isolated()) {
+      POINT sp{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+      ClientToScreen(h, &sp);
+      bool moved = sp.x != g_pointer.x || sp.y != g_pointer.y;
+      g_pointer = sp;
+      if (!overlay && !g_mouse_captured && moved && !input_isolated()) {
         bool shown = game::menu_cursor_visible();
-        game::menu_mouse_moved();
+        game::menu_mouse_moved();  // in a menu the cursor appears at once
         if (!shown && game::input_context() == game::InputContext::Menu) SetCursor(client_cursor());
         capture_for_gameplay();  // the mouse moved in gameplay after a controller: mouse look takes it
       }
-      last = lp;
       break;
     }
     case WM_MOUSEACTIVATE:
@@ -371,10 +380,11 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                                                                  : 4;
       if (overlay) {
         ui::on_mouse_button(button, down, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
-        if (down) SetCapture(h);
-        else ReleaseCapture();
+        if (down && ui::is_open()) SetCapture(h);  // drags in PC SETTINGS
+        else ReleaseCapture();                     // also when the press closed it (right click)
         return msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP ? TRUE : 0;
       }
+      if (!down && GetCapture() == h) ReleaseCapture();
       if (!g_mouse_captured && !input_isolated()) {
         // In the game's menus and on its other screens the mouse stays free (cursor, clicks);
         // in gameplay a click takes it for mouse look (isolated test runs never take the cursor).
@@ -486,6 +496,7 @@ bool window_create(const std::string& title, int w, int h, bool visible) {
   if (!g_hwnd) return false;
   g_alive = true;
   g_thread = GetCurrentThreadId();
+  GetCursorPos(&g_pointer);  // where the pointer rests: no move yet
   set_client_size(w, h);  // fitted to the monitor, centred
   RAWINPUTDEVICE rid{};
   rid.usUsagePage = 0x01;  // generic desktop
@@ -493,8 +504,8 @@ bool window_create(const std::string& title, int w, int h, bool visible) {
   rid.hwndTarget = g_hwnd;
   if (!RegisterRawInputDevices(&rid, 1, sizeof rid))
     LOG_W("input", "raw mouse input unavailable (RegisterRawInputDevices failed, error %lu)", GetLastError());
-  if (visible && input_isolated()) {
-    ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);  // isolated test runs never take the focus
+  if (visible && (input_isolated() || cfg().no_activate)) {
+    ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);  // test runs never take the focus
   } else if (visible) {
     ShowWindow(g_hwnd, SW_SHOW);
     SetForegroundWindow(g_hwnd);  // granted when the launcher (in front) started the game
