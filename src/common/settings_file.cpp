@@ -71,7 +71,7 @@ const char* const kKeyboardDefaults =
     "rstick_left = Num4\n"
     "rstick_right = Num6\n"
     "r3 = C\n"
-    "# BOOST: boost (hold to rise), quick boost, overed boost\n"
+    "# BOOST: boost (hold to rise), quick boost, over boost\n"
     "l2 = Space\n"
     "r2 = Shift\n"
     "triangle = E\n"
