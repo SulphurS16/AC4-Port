@@ -48,21 +48,14 @@ u64 vblank_count();
 
 // Starts the RSX command processor and vblank threads (called once by cellGcmInit).
 void start();
-// A movie frame was fetched for display (game hook on its cellSail graphics adapter wrapper). The
-// adapter picks frames by the flip times it is given (cellGcmGetLastFlipTime): while movies play,
-// flips stay at about 60 per second whatever frame limit is selected.
-void note_movie_frame();
-
-// Blocks until the FIFO read pointer (io offset) is outside [lo, hi]: a command buffer segment the
-// game wants to reuse has been consumed. Woken by the FIFO thread; no spinning.
+// The default command buffer's fragments (io offsets [lo, hi)), for FIFO diagnostics.
+void set_ring(u32 io_lo, u32 io_hi);
+// Blocks the calling thread until the FIFO's GET offset is outside [lo, hi] (io offsets).
 void wait_get_outside(u32 lo, u32 hi);
 
 // Debug statistics.
 std::string stats();
 u64 flips();  // flips executed so far
-// Renderer switches for A/B measurements ("gpu NAME VALUE" control command): "submit on|off"
-// (D3D11 calls on their own thread or on the FIFO thread). False for an unknown name or value.
-bool gpu_option(const std::string& name, const std::string& value);
 void dump();  // diagnostics: FIFO pointers, pending semaphore acquire, last methods
 
 }  // namespace rt::rsx

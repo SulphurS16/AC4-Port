@@ -92,7 +92,6 @@ s32 sys_spu_thread_initialize(Ptr<be32> thread, u32 group_id, u32 spu_num, u32 i
   t->index = spu_num;
   t->option = attr->option;
   t->name = attr->name ? read_cstr(attr->name, std::max<u32>(attr->name_len, 1)) : std::string("spu");
-  t->traced = !cfg().trace_spu.empty() && (t->name.find(cfg().trace_spu) != std::string::npos);
   t->entry = entry;
   t->segs = std::move(segs);
   t->args[0] = arg->arg1;

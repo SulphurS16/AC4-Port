@@ -132,6 +132,107 @@ s32 sys_lwmutex_unlock(Ptr<LwMutexGuest> lw) {
   return CELL_OK;
 }
 
+// ---- lightweight condition variable (system software 4.x modules use it; the game does not) ----
+// Waiters sleep under the lwmutex's own lock, like sys_cond with its mutex.
+struct LwCondGuest {
+  be32 lwmutex, lwcond_queue;
+};
+struct LwCond {
+  u32 mutex = 0;  // guest lwmutex address
+  std::condition_variable cv;
+  std::vector<u32> queue;  // waiting thread ids in arrival order
+  std::set<u32> woken;     // selected by a signal, not yet returned from the wait
+};
+std::map<u32, std::shared_ptr<LwCond>> g_lwc;  // guarded by g_lw_mu
+u32 g_lwc_next = 0x97000000;
+
+std::shared_ptr<LwCond> lwc_get(u32 addr) {
+  std::lock_guard lk(g_lw_mu);
+  auto it = g_lwc.find(addr);
+  return it == g_lwc.end() ? nullptr : it->second;
+}
+s32 sys_lwcond_create(Ptr<LwCondGuest> c, Ptr<LwMutexGuest> lw, u32 attr) {
+  if (!c || !lw) return CELL_EFAULT;
+  lw_get(lw.addr, true);
+  auto o = std::make_shared<LwCond>();
+  o->mutex = lw.addr;
+  std::lock_guard lk(g_lw_mu);
+  g_lwc[c.addr] = o;
+  c->lwmutex = lw.addr;
+  c->lwcond_queue = g_lwc_next++;
+  return CELL_OK;
+}
+s32 sys_lwcond_destroy(Ptr<LwCondGuest> c) {
+  auto o = lwc_get(c.addr);
+  if (!o) return CELL_ESRCH;
+  {
+    auto mx = lw_get(o->mutex, true);
+    std::lock_guard lk(mx->m);
+    if (!o->queue.empty() || !o->woken.empty()) return CELL_EBUSY;
+  }
+  std::lock_guard lk(g_lw_mu);
+  g_lwc.erase(c.addr);
+  return CELL_OK;
+}
+s32 sys_lwcond_wait(Ptr<LwCondGuest> c, u64 timeout) {
+  auto o = lwc_get(c.addr);
+  if (!o) return CELL_ESRCH;
+  auto mx = lw_get(o->mutex, true);
+  auto lw = gp<LwMutexGuest>(o->mutex);
+  u32 me = self_id();
+  std::unique_lock lk(mx->m);
+  if (mx->o.owner != me) return CELL_EPERM;
+  u32 saved = mx->o.count;
+  mx->o.count = 0;
+  if (lv2::fair_release(mx->o)) mx->cv.notify_all();
+  lw->owner = mx->o.owner ? mx->o.owner : LWMUTEX_FREE;
+  lw->recursive_count = mx->o.owner ? 1 : 0;
+  o->queue.push_back(me);
+  bool ok = lv2::wait_us(o->cv, lk, timeout, [&] { return o->woken.count(me) != 0; });
+  if (!o->woken.erase(me)) o->queue.erase(std::find(o->queue.begin(), o->queue.end(), me));  // timed out
+  // Reacquire the lwmutex (a timeout still reacquires before returning).
+  lw->waiter = u32(lw->waiter) + 1;
+  lv2::fair_acquire(mx->o, mx->cv, lk, me, 0);
+  lw->waiter = u32(lw->waiter) - 1;
+  mx->o.count = saved;
+  lw->owner = me;
+  lw->recursive_count = saved;
+  return ok ? CELL_OK : CELL_ETIMEDOUT;
+}
+s32 sys_lwcond_signal(Ptr<LwCondGuest> c) {
+  auto o = lwc_get(c.addr);
+  if (!o) return CELL_ESRCH;
+  auto mx = lw_get(o->mutex, true);
+  std::lock_guard lk(mx->m);
+  if (!o->queue.empty()) {
+    o->woken.insert(lv2::pick_waiter(o->queue, mx->o.protocol));
+    o->cv.notify_all();
+  }
+  return CELL_OK;
+}
+s32 sys_lwcond_signal_all(Ptr<LwCondGuest> c) {
+  auto o = lwc_get(c.addr);
+  if (!o) return CELL_ESRCH;
+  auto mx = lw_get(o->mutex, true);
+  std::lock_guard lk(mx->m);
+  o->woken.insert(o->queue.begin(), o->queue.end());
+  o->queue.clear();
+  o->cv.notify_all();
+  return CELL_OK;
+}
+s32 sys_lwcond_signal_to(Ptr<LwCondGuest> c, u32 thread_id) {
+  auto o = lwc_get(c.addr);
+  if (!o) return CELL_ESRCH;
+  auto mx = lw_get(o->mutex, true);
+  std::lock_guard lk(mx->m);
+  auto it = std::find(o->queue.begin(), o->queue.end(), thread_id);
+  if (it == o->queue.end()) return CELL_EPERM;
+  o->queue.erase(it);
+  o->woken.insert(thread_id);
+  o->cv.notify_all();
+  return CELL_OK;
+}
+
 }  // namespace
 
 // Logs every lightweight mutex that is currently held (diagnostics).
@@ -173,7 +274,9 @@ void sys_process_exit(s32 status) { process_exit(status); }
 void _sys_process_atexitspawn() { LOG_D("process", "_sys_process_atexitspawn (ignored: no exitspawn support)"); }
 void _sys_process_at_Exitspawn() { LOG_D("process", "_sys_process_at_Exitspawn (ignored: no exitspawn support)"); }
 void sys_prx_exitspawn_with_level() {
-  LOG_E("process", "sys_prx_exitspawn_with_level: the game asked to spawn another executable; exiting");
+  // The game's own quit (after the exit request when the window closes): on the console it hands
+  // over to the system menu; here the process ends.
+  LOG_I("process", "sys_prx_exitspawn_with_level: the game quits (to the system menu on the console)");
   process_exit(0);
 }
 
@@ -280,6 +383,11 @@ u32 _sys_strcat(u32 dst, u32 src) {
   std::memcpy(ppu::mem() + dst + a.size(), b.c_str(), b.size() + 1);
   return dst;
 }
+u32 _sys_strncat(u32 dst, u32 src, u32 n) {
+  std::string a = read_cstr(dst, 1u << 20), b = read_cstr(src, n);
+  std::memcpy(ppu::mem() + dst + a.size(), b.c_str(), b.size() + 1);
+  return dst;
+}
 s32 put_formatted(u32 buf, u32 size, const std::string& s) {
   if (size) write_cstr(buf, s, size);
   return s32(s.size());
@@ -347,6 +455,7 @@ static hle::Module s_module("sysPrxForUser", {
     HLE_FN(_sys_strcmp),
     HLE_FN(_sys_strcpy),
     HLE_FN(_sys_strlen),
+    HLE_FN(_sys_strncat),
     HLE_FN(_sys_strncmp),
     HLE_FN(_sys_strncpy),
     HLE_FN(_sys_vprintf),
@@ -361,6 +470,12 @@ static hle::Module s_module("sysPrxForUser", {
     HLE_FN(_sys_process_at_Exitspawn),
     HLE_FN(_sys_process_atexitspawn),
     HLE_FN(sys_initialize_tls),
+    HLE_FN(sys_lwcond_create),
+    HLE_FN(sys_lwcond_destroy),
+    HLE_FN(sys_lwcond_signal),
+    HLE_FN(sys_lwcond_signal_all),
+    HLE_FN(sys_lwcond_signal_to),
+    HLE_FN(sys_lwcond_wait),
     HLE_FN(sys_lwmutex_create),
     HLE_FN(sys_lwmutex_destroy),
     HLE_FN(sys_lwmutex_lock),

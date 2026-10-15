@@ -1,0 +1,5 @@
+// UTF-8 as the process code page (Windows 10 1903+): paths with any characters work through the
+// tools' narrow-string file APIs and command lines.
+#include <windows.h>
+
+1 RT_MANIFEST "utf8.manifest"

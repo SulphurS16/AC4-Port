@@ -10,11 +10,9 @@
 
 namespace rt::gpu::timing {
 
-bool enabled();
-bool per_draw();
-// Starts a pass: the GPU time from here to the next mark is charged to `label`.
-void mark(std::string label);
-// End of a frame (after its presentation was recorded).
-void frame_end();
-
+// Player builds: no GPU timing.
+inline bool enabled() { return false; }
+inline bool per_draw() { return false; }
+inline void mark(const std::string&) {}
+inline void frame_end() {}
 }  // namespace rt::gpu::timing

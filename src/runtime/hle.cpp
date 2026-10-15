@@ -8,8 +8,6 @@
 
 namespace rt::hle {
 
-bool g_trace = false;
-
 namespace {
 struct Registry {
   std::map<std::pair<std::string, u32>, std::pair<std::string, Handler>> funcs;

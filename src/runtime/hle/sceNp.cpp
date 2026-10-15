@@ -44,7 +44,7 @@ constexpr u32 kMinPoolSize = 128 * 1024;
 
 std::mutex g_mu;
 bool g_init = false, g_score_init = false;
-u32 g_manager_cb = 0, g_manager_cb_arg = 0;
+[[maybe_unused]] u32 g_manager_cb = 0, g_manager_cb_arg = 0;  // registered callback (kept: offline, never invoked)
 u32 g_basic_handler = 0, g_basic_arg = 0;
 // Local context ids (contexts hold no network state while offline).
 std::map<s32, bool> g_score_title_ctx, g_score_trans_ctx;

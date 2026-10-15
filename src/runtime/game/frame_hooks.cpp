@@ -196,12 +196,4 @@ void hook_layer_add_direct(Ctx& ctx, void (*orig)(Ctx&)) {  // 0x8eb628
   orig(ctx);
 }
 
-// The game's movie frame fetch (0xd30e6c: wraps cellSailGraphicsAdapterGetFrame; its partner
-// 0xd30e04 passes cellGcmGetLastFlipTime to cellSailGraphicsAdapterUpdateAvSync). Tells the RSX
-// side that a movie is on screen, so flips keep the console's cadence (rsx::note_movie_frame).
-void hook_movie_get_frame(Ctx& ctx, void (*orig)(Ctx&)) {
-  rt::rsx::note_movie_frame();
-  orig(ctx);
-}
-
 }  // namespace ppu

@@ -22,38 +22,8 @@ std::atomic<int> g_active{0};
 std::mutex g_mu;  // one dialog at a time
 
 // ---- scripted answers (--dialog, and live "dialog ..." control commands) ----
-std::deque<std::string> g_script;
-bool g_script_parsed = false;
-std::mutex g_live_mu;
-std::deque<std::string> g_live;  // answers queued while running; used before the --dialog script
-bool take_live(std::string* answer) {
-  std::lock_guard lk(g_live_mu);
-  if (g_live.empty()) return false;
-  *answer = g_live.front();
-  g_live.pop_front();
-  return true;
-}
-bool scripted(std::string* answer) {
-  if (take_live(answer)) return true;
-  if (!g_script_parsed) {
-    g_script_parsed = true;
-    const std::string& s = cfg().dialog_script;
-    for (size_t p = 0; p < s.size();) {
-      size_t q = s.find(',', p);
-      g_script.push_back(s.substr(p, q == std::string::npos ? std::string::npos : q - p));
-      if (q == std::string::npos) break;
-      p = q + 1;
-    }
-  }
-  if (cfg().dialog_script.empty()) return false;
-  if (g_script.empty()) {
-    *answer = "";
-    return true;  // script exhausted: answered as "back"
-  }
-  *answer = g_script.front();
-  g_script.pop_front();
-  return true;
-}
+bool take_live(std::string*) { return false; }  // player builds: no scripted answers
+bool scripted(std::string*) { return false; }
 
 std::wstring widen(const std::string& s) {
   if (s.empty()) return {};
@@ -274,7 +244,9 @@ void run_dialog(Dlg* d) {
     RegisterClassExW(&wc);
     registered = true;
   }
-  const int W = 560, H = d->kind == Dlg::List ? 460 : d->kind == Dlg::Text ? 420 : 220;
+  const int dpi = int(GetDpiForWindow(owner) ? GetDpiForWindow(owner) : 96);
+  auto S = [dpi](int v) { return MulDiv(v, dpi, 96); };  // sizes below are at 96 DPI
+  const int W = S(560), H = S(d->kind == Dlg::List ? 460 : d->kind == Dlg::Text ? 420 : 220);
   RECT orc{};
   GetWindowRect(owner, &orc);
   RECT r{0, 0, W, H};
@@ -288,7 +260,7 @@ void run_dialog(Dlg* d) {
     return;
   }
   SetWindowLongPtrW(d->wnd, GWLP_USERDATA, LONG_PTR(d));
-  d->font = CreateFontW(-17, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+  d->font = CreateFontW(-S(17), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
   auto child = [&](const wchar_t* cls, const wchar_t* text, DWORD st, int cx, int cy, int cw, int ch, int id) {
     HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | st, cx, cy, cw, ch, d->wnd, HMENU(INT_PTR(id)), inst, nullptr);
     SendMessageW(c, WM_SETFONT, WPARAM(d->font), TRUE);
@@ -296,36 +268,36 @@ void run_dialog(Dlg* d) {
   };
   const wchar_t* accept_label = d->kind == Dlg::Question ? L"Yes" : L"OK";
   if (d->kind == Dlg::List) {
-    d->list = child(L"LISTBOX", L"", WS_BORDER | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, 12, 12, W - 24, 300, ID_LIST);
+    d->list = child(L"LISTBOX", L"", WS_BORDER | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, S(12), S(12), W - S(24), S(300), ID_LIST);
     for (const auto& row : d->rows) SendMessageW(d->list, LB_ADDSTRING, 0, LPARAM(row.c_str()));
     SendMessageW(d->list, LB_SETCURSEL, WPARAM(d->focus), 0);
-    d->detail = child(L"STATIC", L"", SS_LEFT, 12, 320, W - 24, 80, ID_DETAIL);
+    d->detail = child(L"STATIC", L"", SS_LEFT, S(12), S(320), W - S(24), S(80), ID_DETAIL);
     update_detail(d);
-    d->accept = child(L"BUTTON", accept_label, WS_TABSTOP | BS_DEFPUSHBUTTON, W - 236, H - 46, 108, 32, ID_ACCEPT);
-    d->back = child(L"BUTTON", L"Back", WS_TABSTOP | BS_PUSHBUTTON, W - 120, H - 46, 108, 32, ID_BACK);
+    d->accept = child(L"BUTTON", accept_label, WS_TABSTOP | BS_DEFPUSHBUTTON, W - S(236), H - S(46), S(108), S(32), ID_ACCEPT);
+    d->back = child(L"BUTTON", L"Back", WS_TABSTOP | BS_PUSHBUTTON, W - S(120), H - S(46), S(108), S(32), ID_BACK);
     SetFocus(d->list);
   } else if (d->kind == Dlg::Text) {
-    child(L"STATIC", d->text.c_str(), SS_LEFT, 16, 16, W - 32, 90, ID_TEXT);
-    d->edit = child(L"EDIT", d->edit_text.c_str(), WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 16, 116, W - 32, 30, ID_EDIT);
+    child(L"STATIC", d->text.c_str(), SS_LEFT, S(16), S(16), W - S(32), S(90), ID_TEXT);
+    d->edit = child(L"EDIT", d->edit_text.c_str(), WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, S(16), S(116), W - S(32), S(30), ID_EDIT);
     SendMessageW(d->edit, EM_SETLIMITTEXT, WPARAM(d->max_chars), 0);
     SendMessageW(d->edit, EM_SETSEL, 0, -1);
-    const int n = int(std::size(kKeys)) - 1, kw = (W - 32) / kKeyCols;
+    const int n = int(std::size(kKeys)) - 1, kw = (W - S(32)) / kKeyCols;
     for (int i = 0; i < n; ++i) {
       wchar_t label[8] = {kKeys[i], 0};
       if (kKeys[i] == L' ') wcscpy(label, L"Space");
-      d->keys.push_back(child(L"BUTTON", label, WS_TABSTOP | BS_PUSHBUTTON, 16 + (i % kKeyCols) * kw, 160 + (i / kKeyCols) * 36, kw - 4, 32,
+      d->keys.push_back(child(L"BUTTON", label, WS_TABSTOP | BS_PUSHBUTTON, S(16) + (i % kKeyCols) * kw, S(160) + (i / kKeyCols) * S(36), kw - S(4), S(32),
                               ID_KEY0 + i));
     }
-    child(L"STATIC", L"Controller: D-pad select, A type, X delete, Y space, Start OK, B back", SS_LEFT, 16, H - 84, W - 32, 22,
+    child(L"STATIC", L"Controller: D-pad select, A type, X delete, Y space, Start OK, B back", SS_LEFT, S(16), H - S(84), W - S(32), S(22),
           ID_TEXT);
-    d->accept = child(L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, W - 236, H - 46, 108, 32, ID_ACCEPT);
-    d->back = child(L"BUTTON", L"Back", WS_TABSTOP | BS_PUSHBUTTON, W - 120, H - 46, 108, 32, ID_BACK);
+    d->accept = child(L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, W - S(236), H - S(46), S(108), S(32), ID_ACCEPT);
+    d->back = child(L"BUTTON", L"Back", WS_TABSTOP | BS_PUSHBUTTON, W - S(120), H - S(46), S(108), S(32), ID_BACK);
     SetFocus(d->edit);
   } else {
-    child(L"STATIC", d->text.c_str(), SS_LEFT, 16, 16, W - 32, H - 80, ID_TEXT);
-    d->accept = child(L"BUTTON", accept_label, WS_TABSTOP | BS_DEFPUSHBUTTON, W - (d->kind == Dlg::Question ? 236 : 120), H - 46, 108, 32,
+    child(L"STATIC", d->text.c_str(), SS_LEFT, S(16), S(16), W - S(32), H - S(80), ID_TEXT);
+    d->accept = child(L"BUTTON", accept_label, WS_TABSTOP | BS_DEFPUSHBUTTON, W - (d->kind == Dlg::Question ? S(236) : S(120)), H - S(46), S(108), S(32),
                       ID_ACCEPT);
-    if (d->kind == Dlg::Question) d->back = child(L"BUTTON", L"No", WS_TABSTOP | BS_PUSHBUTTON, W - 120, H - 46, 108, 32, ID_BACK);
+    if (d->kind == Dlg::Question) d->back = child(L"BUTTON", L"No", WS_TABSTOP | BS_PUSHBUTTON, W - S(120), H - S(46), S(108), S(32), ID_BACK);
     SetFocus(d->accept);
   }
   d->pad_last = pad_now();
@@ -360,16 +332,6 @@ bool show(Dlg* d) {
 }  // namespace
 
 bool active() { return g_active.load() > 0; }
-
-void queue_answers(const std::string& csv) {
-  std::lock_guard lk(g_live_mu);
-  for (size_t p = 0; p <= csv.size();) {
-    size_t q = csv.find(',', p);
-    if (q == std::string::npos) q = csv.size();
-    g_live.push_back(csv.substr(p, q - p));
-    p = q + 1;
-  }
-}
 
 void abort() {
   if (HWND w = g_open_wnd.load()) PostMessageW(w, WM_CLOSE, 0, 0);

@@ -5,8 +5,8 @@ param(
   [string]$Target = "",
   [switch]$Clean
 )
-# CMake reports regenerations ("GLOB mismatch!") on stderr: never treat that as a failure here
-# (callers may run with $ErrorActionPreference = "Stop"); the exit code decides.
+# Windows PowerShell 5.1 turns a native tool's stderr lines into error records; under a caller's
+# "Stop" preference CMake's "GLOB mismatch" notice would abort the build. Exit codes decide here.
 $ErrorActionPreference = "Continue"
 . (Join-Path $PSScriptRoot "env.ps1")
 $root = Split-Path -Parent $PSScriptRoot

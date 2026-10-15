@@ -16,8 +16,24 @@ struct VpInfo {
   std::string error;     // non-empty if the program could not be translated
 };
 
+// Vertex attribute descriptors (cbuffer VtxFmt : b2), one per input register, filled by the
+// renderer per draw. Arrays are read from raw guest bytes (big-endian) in ByteAddressBuffers
+// t0..t3 and decoded in the shader: element k' = (stride ? (freq > 1 ? (modulo ? k % freq :
+// k / freq) : k) : 0) for the draw's element index k (SV_VertexID), address base + k' * stride.
+struct VtxAttr {
+  u32 base;    // byte address of element 0 in the attribute's buffer (wraps: may lie before the data)
+  u32 stride;  // bytes between elements
+  u32 freq;    // frequency divider (0/1: none)
+  u32 fmt;     // type | size << 4 | buffer << 8 | modulo << 12 | array << 16 (array 0: the constant)
+};
+struct VtxFmt {
+  VtxAttr attr[16];
+  float konst[16][4];  // inputs without an array: the register values
+};
+constexpr u32 kVtxBuffers = 4;
+
 // Translates the program starting at `start`. The shader reads:
-//   StructuredBuffer<float4> vtx : t0     (16 float4 attributes per vertex, SV_VertexID-indexed)
+//   ByteAddressBuffer vb0..vb3 : t0..t3   (raw vertex streams), cbuffer VtxFmt : b2
 //   cbuffer VpConst : b0 { float4 vc[512]; }
 //   cbuffer VpState : b1 { float4 vp_scale, vp_offset, rt_size; uint4 vp_flags; }  (rt_size.zw = 1/size)
 // and writes SV_Position plus o1..o15 as TEXCOORD1..15.

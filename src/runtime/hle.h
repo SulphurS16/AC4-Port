@@ -134,8 +134,8 @@ class StackAlloc {
   u32 addr_;
 };
 
-// Tracing of HLE calls (enabled with --trace-hle).
-extern bool g_trace;
+// Tracing of HLE calls (enabled with --trace-hle; never in player builds).
+constexpr bool g_trace = false;
 
 }  // namespace rt::hle
 

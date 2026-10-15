@@ -56,7 +56,7 @@ void get_report(u32 arg) {
     LOG_E("rsx", "GET_REPORT to invalid offset 0x%x (location %u)", offset, loc);
     return;
   }
-  u32 value = renderer_report_value(type);
+  u32 value = renderer_report_value(type, ea);
   ppu::w64(ea, lv2::system_time_us() * 1000);  // nanoseconds
   ppu::w32(ea + 8, value);
   ppu::w32(ea + 12, 0);
@@ -210,15 +210,25 @@ void scaled_image() {
 
 u32 g_method_ring[32][2];       // the last methods (dump); written by the FIFO thread only
 std::atomic<u32> g_method_pos{0};  // published with plain stores: no locked operation per method
+u8 g_method_special[0x10000 / 4];
+
+void init_method_kinds() {
+  auto mark = [](u32 method, u32 bytes) {
+    for (u32 m = method; m < method + bytes && m < 0x10000; m += 4) g_method_special[m >> 2] = 1;
+  };
+  mark(m::NV308A_COLOR, 0x700 * 4);
+  for (u32 m : {m::SET_REFERENCE, m::SEMAPHORE_OFFSET_406E, m::SEMAPHORE_ACQUIRE, m::SEMAPHORE_RELEASE,
+                m::BACK_END_WRITE_SEMAPHORE_RELEASE, m::TEXTURE_READ_SEMAPHORE_RELEASE, m::GET_REPORT, m::NV0039_BUFFER_NOTIFY,
+                m::NV3089_IMAGE_IN, m::GCM_FLIP_COMMAND})
+    mark(m, 4);
+  renderer_mark_special(mark);
+}
 
 void execute_method(u32 ri, u32 arg, u32 count, u32 index) {
   u32 method = ri << 2;
   {
-    static u32 pos = 0;  // FIFO thread only
-    u32 n = pos++;
-    g_method_ring[n & 31][0] = method;
-    g_method_ring[n & 31][1] = arg;
-    g_method_pos.store(pos, std::memory_order_relaxed);
+    u32 n = g_method_pos.load(std::memory_order_relaxed);
+    record_method(method, arg);
     static const u32 trace_limit = cfg().trace_rsx;
     static const double trace_at = cfg().trace_rsx_at;
     static u32 traced = 0;
@@ -241,9 +251,11 @@ void execute_method(u32 ri, u32 arg, u32 count, u32 index) {
       sem_offset_406e = arg;
       return;
     case m::SEMAPHORE_ACQUIRE:
+      if (sem_offset_406e >= 0x1000) fifo_desync("semaphore offset outside the label area", sem_offset_406e);
       semaphore_acquire(kLabelAddr + sem_offset_406e, arg);
       return;
     case m::SEMAPHORE_RELEASE:
+      if (sem_offset_406e >= 0x1000) fifo_desync("semaphore offset outside the label area", sem_offset_406e);
       ppu::w32(kLabelAddr + sem_offset_406e, arg);
       return;
     case m::BACK_END_WRITE_SEMAPHORE_RELEASE: {

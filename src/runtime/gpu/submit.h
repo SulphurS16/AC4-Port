@@ -46,9 +46,11 @@ class Recorder {
   // `bytes` of `data` are copied (the whole update: row pitch x rows x depth for textures).
   void UpdateSubresource(ID3D11Resource* r, UINT sub, const D3D11_BOX* box, const void* data, UINT row_pitch, UINT depth_pitch,
                          size_t bytes);
-  // Part of a constant buffer: `bytes` at byte `offset`. Only the part is recorded; the executing
-  // side patches its own copy of the whole buffer and uploads it whole (plain UpdateSubresource).
-  void UpdateConstants(ID3D11Buffer* b, u32 offset, u32 bytes, const void* data);
+  // Constant buffer `b` of `total` bytes with `bytes` at `offset` changed: only the change is
+  // recorded; the executing thread keeps a copy of the whole buffer, applies the change to it and
+  // updates the buffer whole (a partial UpdateSubresource1 of a constant buffer in use lost the
+  // rest of the buffer with the dev PC's driver).
+  void UpdateConstants(ID3D11Buffer* b, u32 offset, const void* data, u32 bytes, u32 total);
   // Map (WRITE_DISCARD or WRITE_NO_OVERWRITE), copy `bytes` to `offset`, Unmap (dynamic buffers).
   void write_buffer(ID3D11Buffer* b, D3D11_MAP mode, u32 offset, const void* data, u32 bytes);
   // Room for `bytes` that write_buffer would copy, filled by the caller before the next call
@@ -67,8 +69,9 @@ class Recorder {
   void frame_end(u32 max_frames = 1);
   // Waits until everything recorded has run.
   void finish();
-  // After a draw: hands the recorded calls over when the submission thread is idle or the batch is
-  // large, so it starts early without a handover per call.
+  // After a draw: hands the recorded calls over when the submission thread is idle and at least
+  // the kick batch of draws is recorded, or the chunk is large, so it starts early without a
+  // handover (a thread wake-up on both sides) per draw.
   void kick();
   bool async() const;
 };
@@ -79,6 +82,8 @@ void submit_init(bool async);
 // "gpu submit on|off" (applied at the next frame boundary by apply_submit_mode).
 void request_submit_mode(bool async);
 void apply_submit_mode();
+// "gpu kick N": draws per handover to an idle submission thread (A/B measurements; default 32).
+void set_kick_batch(u32 draws);
 // Submission thread statistics for the perf lines: milliseconds spent executing calls and CPU
 // cycles used (OS thread cycle count), both totals since start.
 void submit_stats(double* busy_ms, u64* cpu_cycles);

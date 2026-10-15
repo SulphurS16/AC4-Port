@@ -95,15 +95,15 @@ void mouse_look_frame() {
   rt::input_mouse_take(&dx, &dy);
   const rt::bindings::MouseSettings& m = rt::bindings::mouse();
   static int traced = 0;  // diagnostics: the first frames with mouse movement
-  if (dt <= 0 || dt > 0.25 || m.sensitivity <= 0) {
+  if (dt <= 0 || dt > 0.25 || (m.sensitivity_x <= 0 && m.sensitivity_y <= 0)) {
     if ((dx || dy || g_mouse_turn.backlog) && traced++ < 60)
       LOG_I("input", "mouse look: %lld, %lld counts dropped (%.0f ms since the previous frame)", (long long)dx, (long long)dy,
             dt * 1000);
     g_mouse_turn = g_mouse_pitch = MouseAxis{};
     return;
   }
-  mouse_axis(g_mouse_turn, dx, m.sensitivity * kTurnPerCount, dt, kMaxCarrySeconds);
-  double pitch_sens = m.sensitivity * kPitchPerCount * kPitchDownSign;
+  mouse_axis(g_mouse_turn, m.invert_x ? -dx : dx, m.sensitivity_x * kTurnPerCount, dt, kMaxCarrySeconds);
+  double pitch_sens = m.sensitivity_y * kPitchPerCount * kPitchDownSign;
   mouse_axis(g_mouse_pitch, m.invert_y ? -dy : dy, pitch_sens, dt, kMaxCarrySeconds);
   // At a pitch limit the game discards motion beyond it; the carried mouse motion toward that limit
   // is dropped too, so pushing against the limit leaves no dead zone for the way back.

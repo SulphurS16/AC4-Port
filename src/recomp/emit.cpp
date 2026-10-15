@@ -83,7 +83,10 @@ bool FnEmitter::insn(u32 pc, u32 w) {
   u32 d = rd(w), a = ra(w), b = rb(w), c = rc_(w);
   s32 si = simm(w);
   u32 ui = uimm(w);
-  bool rec = rc(w);
+  // Bit 0 is the record bit only in the M/MD/X/XO/A forms (primary opcodes 20/21/23, 30, 31, 59,
+  // 63); in the D-form immediates (mulli, ori, oris, xori, xoris) it is the immediate's low bit.
+  u32 po = w >> 26;
+  bool rec = rc(w) && (po == 20 || po == 21 || po == 23 || po == 30 || po == 31 || po == 59 || po == 63);
   auto CR0 = [&](u32 reg) { return rec ? strprintf("cr0(ctx,R(%u));", reg) : std::string(); };
   auto OV = [&](const std::string& expr) { return oe(w) ? "set_ov(ctx," + expr + ");" : std::string(); };
   // Logical/rotate results land in rA (from rS = d).

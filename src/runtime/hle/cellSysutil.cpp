@@ -21,6 +21,7 @@ void cellSaveDataAutoSave2(ppu::Ctx& ctx);
 void cellSaveDataFixedLoad2(ppu::Ctx& ctx);
 void cellSaveDataFixedSave2(ppu::Ctx& ctx);
 void cellSaveDataListLoad2(ppu::Ctx& ctx);
+s32 cellSaveDataDelete2(u32 container);
 void cellSaveDataListSave2(ppu::Ctx& ctx);
 void cellSaveDataAutoLoad(ppu::Ctx& ctx);
 void cellSaveDataAutoSave(ppu::Ctx& ctx);
@@ -253,7 +254,7 @@ static hle::Module s_module("cellSysutil", {
     // cellOskDialog*: osk_dialog.cpp
     HLE_RAW(save_data::cellSaveDataAutoLoad2),
     HLE_RAW(save_data::cellSaveDataAutoSave2),
-    HLE_TODO(cellSaveDataDelete2),
+    HLE_FN(save_data::cellSaveDataDelete2),
     HLE_RAW(save_data::cellSaveDataAutoLoad),
     HLE_RAW(save_data::cellSaveDataAutoSave),
     HLE_RAW(save_data::cellSaveDataDelete),

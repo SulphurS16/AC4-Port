@@ -129,25 +129,6 @@ struct Cond {
   std::string name;
   u32 waiters() const { return u32(queue.size() + woken.size()); }
 };
-// Removes and returns the waiter a signal wakes: highest priority for the priority protocols,
-// otherwise the longest waiting.
-u32 pick_waiter(std::vector<u32>& q, u32 protocol) {
-  size_t pick = 0;
-  if (protocol == 2 || protocol == 3) {
-    s32 best = 0x7fffffff;
-    for (size_t i = 0; i < q.size(); ++i) {
-      PpuThread* t = thread_get(q[i]);
-      s32 p = t ? t->prio : 0x7fffffff;
-      if (p < best) {
-        best = p;
-        pick = i;
-      }
-    }
-  }
-  u32 id = q[pick];
-  q.erase(q.begin() + std::ptrdiff_t(pick));
-  return id;
-}
 IdMap<Cond> g_cond(0x86000000);
 
 s32 sys_cond_create(Ptr<be32> id, u32 mutex_id, Ptr<AttrCond> attr) {

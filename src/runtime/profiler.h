@@ -9,19 +9,7 @@
 
 namespace rt::prof {
 
-// Registers a host thread (HANDLE) that may be sampled.
-void register_thread(const std::string& name, void* handle);
-void unregister_thread(void* handle);
-// Snapshot of the registered threads (handle, name).
-std::vector<std::pair<void*, std::string>> threads();
-// match: threads to sample (profile.txt); stacks: threads whose whole call stacks are also recorded
-// (profile_stacks.txt; summarize with tools/profstack.py).
-void start(const std::string& match, const std::string& stacks);
-void write_report(const std::string& path);
-// Logs the CPU time (user + kernel) used so far by each registered thread, busiest first.
-void cpu_report();
-// The `top` busiest registered threads since the previous call, as "name NN%, ..." (percent of
-// one core over the interval).
-std::string cpu_interval(int top);
-
+// Player builds: no profiler.
+inline void register_thread(const std::string&, void*) {}
+inline void unregister_thread(void*) {}
 }  // namespace rt::prof

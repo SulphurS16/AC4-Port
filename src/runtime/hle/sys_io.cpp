@@ -5,6 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -15,25 +16,21 @@
 #include <windows.h>
 #include <xinput.h>
 
+#include "common/file.h"
 #include "ppu/ppu_recomp.h"
+#include "common/settings_file.h"
 #include "runtime/config.h"
 #include "runtime/hle.h"
 #include "runtime/lv2/lv2.h"
 #include "runtime/bindings.h"
-#include "runtime/datawatch.h"
-#include "runtime/game/game_input.h"
+#include "runtime/game/menu_mouse.h"
 #include "runtime/gpu/input_hooks.h"
-#include "runtime/gpu/present.h"
 #include "runtime/gpu/window.h"
 #include "runtime/input.h"
 #include "runtime/memory.h"
-#include "runtime/memscan.h"
 #include "runtime/rsx/rsx.h"
 #include "runtime/sysdialog.h"
-
-namespace rt::gpu {
-extern std::atomic<int> g_capture_requests;
-}  // namespace rt::gpu
+#include "runtime/ui/overlay.h"
 
 namespace rt {
 namespace {
@@ -82,288 +79,6 @@ bool g_have_last[kPorts] = {};
 
 u8 axis(SHORT v) { return u8(std::clamp((int(v) + 32768) >> 8, 0, 255)); }
 
-// ---- scripted input (--input), for unattended runs ----
-// "t:btn[+btn][:hold]" presses at t seconds; "@Thread Name+t:..." presses t seconds after the next
-// start of that guest thread (games run each scene in a thread of its own) once all earlier
-// presses have happened, so a script follows the game instead of a fixed timeline; "+t:..."
-// presses t seconds after the previous press. The pseudo-button "shot" captures a screenshot when
-// its press starts; "mx=N" and "my=N" move the mouse by N counts, evenly over the hold time.
-//
-// Live control (--control <file>): lines appended to the file while the game runs are added to the
-// script (same syntax; "+t:..." items chain on the last press, so a new line runs right away), and
-// a line "quit" ends the run. With the game paused in its own pause menu between lines, a mission
-// can be played step by step from screenshots.
-struct ScriptedPress {
-  double t = 0, hold = 0.15;
-  u16 d1 = 0, d2 = 0;
-  int lx = -1, ly = -1, rx = -1, ry = -1;
-  s64 mx = 0, my = 0;           // scripted mouse movement (counts) over the hold time
-  s64 mx_done = 0, my_done = 0;  // ... already delivered
-  bool shot = false;
-  bool logged = false;
-  double start = -1;  // first pad read at or after t: the press is held from there
-  std::string anchor;  // thread name; t is resolved from its start
-  double offset = 0;
-};
-std::vector<ScriptedPress> g_script;
-std::mutex g_script_mu;  // live control appends while the game reads the pad
-bool g_script_parsed = false;
-std::atomic<bool> g_quit{false};
-std::mutex g_starts_mu;
-std::vector<std::pair<std::string, double>> g_starts;  // guest thread starts (name, seconds)
-
-void parse_items(const std::string& s) {
-  size_t pos = 0;
-  while (pos < s.size()) {
-    size_t end = s.find(',', pos);
-    std::string item = s.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
-    pos = end == std::string::npos ? s.size() : end + 1;
-    size_t c1 = item.find(':');
-    if (c1 == std::string::npos) continue;
-    ScriptedPress p;
-    p.t = std::atof(item.substr(0, c1).c_str());
-    if (item[0] == '+') {  // relative to the previous press
-      p.offset = std::atof(item.c_str() + 1);
-      p.t = -2;
-    } else if (item[0] == '@') {
-      std::string when = item.substr(1, c1 - 1);
-      size_t plus = when.rfind('+');
-      p.anchor = when.substr(0, plus);
-      p.offset = plus == std::string::npos ? 0 : std::atof(when.c_str() + plus + 1);
-      p.t = -1;
-    }
-    std::string rest = item.substr(c1 + 1);
-    size_t c2 = rest.find(':');
-    if (c2 != std::string::npos) {
-      p.hold = std::atof(rest.substr(c2 + 1).c_str());
-      rest = rest.substr(0, c2);
-    }
-    size_t b = 0;
-    while (b <= rest.size()) {
-      size_t e = rest.find('+', b);
-      std::string n = rest.substr(b, e == std::string::npos ? std::string::npos : e - b);
-      b = e == std::string::npos ? rest.size() + 1 : e + 1;
-      if (n == "select") p.d1 |= SELECT;
-      else if (n == "l3") p.d1 |= L3;
-      else if (n == "r3") p.d1 |= R3;
-      else if (n == "start") p.d1 |= START;
-      else if (n == "up") p.d1 |= UP;
-      else if (n == "right") p.d1 |= RIGHT;
-      else if (n == "down") p.d1 |= DOWN;
-      else if (n == "left") p.d1 |= LEFT;
-      else if (n == "l2") p.d2 |= L2;
-      else if (n == "r2") p.d2 |= R2;
-      else if (n == "l1") p.d2 |= L1;
-      else if (n == "r1") p.d2 |= R1;
-      else if (n == "triangle") p.d2 |= TRIANGLE;
-      else if (n == "circle") p.d2 |= CIRCLE;
-      else if (n == "cross") p.d2 |= CROSS;
-      else if (n == "square") p.d2 |= SQUARE;
-      else if (n == "lup") p.ly = 0;
-      else if (n == "ldown") p.ly = 255;
-      else if (n == "lleft") p.lx = 0;
-      else if (n == "lright") p.lx = 255;
-      else if (n == "rup") p.ry = 0;
-      else if (n == "rdown") p.ry = 255;
-      else if (n == "rleft") p.rx = 0;
-      else if (n == "rright") p.rx = 255;
-      else if (n.size() > 3 && n[2] == '=' && (n[0] == 'l' || n[0] == 'r') && (n[1] == 'x' || n[1] == 'y')) {
-        int v = std::clamp(std::atoi(n.c_str() + 3), 0, 255);  // "rx=N": a stick axis at N (0-255)
-        (n[0] == 'l' ? (n[1] == 'x' ? p.lx : p.ly) : (n[1] == 'x' ? p.rx : p.ry)) = v;
-      }
-      else if (n == "shot") p.shot = true;
-      else if (n.rfind("mx=", 0) == 0) p.mx = std::atoll(n.c_str() + 3);
-      else if (n.rfind("my=", 0) == 0) p.my = std::atoll(n.c_str() + 3);
-      else if (!n.empty()) LOG_W("pad", "--input: unknown button '%s'", n.c_str());
-    }
-    g_script.push_back(p);
-  }
-}
-
-void control_thread(std::string path) {
-  // The file is truncated first: commands from an earlier run never replay.
-  if (FILE* f = std::fopen(path.c_str(), "wb")) std::fclose(f);
-  LOG_I("pad", "--control: reading commands from %s", path.c_str());
-  long offset = 0;
-  std::string partial;
-  for (;;) {
-    Sleep(100);
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) continue;
-    std::fseek(f, 0, SEEK_END);
-    long size = std::ftell(f);
-    if (size < offset) offset = 0;  // replaced by a shorter file
-    if (size > offset) {
-      std::string chunk(size_t(size - offset), '\0');
-      std::fseek(f, offset, SEEK_SET);
-      chunk.resize(std::fread(chunk.data(), 1, chunk.size(), f));
-      offset += long(chunk.size());
-      partial += chunk;
-    }
-    std::fclose(f);
-    for (size_t nl; (nl = partial.find('\n')) != std::string::npos;) {
-      std::string line = partial.substr(0, nl);
-      partial.erase(0, nl + 1);
-      while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
-      if (line.empty()) continue;
-      LOG_I("pad", "control: %s", line.c_str());
-      if (line == "quit") {
-        g_quit = true;
-        continue;
-      }
-      if (line.rfind("scan ", 0) == 0) {  // memory search (memscan.h)
-        if (!memscan::command(line.substr(5))) LOG_W("pad", "control: unknown scan command '%s'", line.c_str());
-        continue;
-      }
-      if (line.rfind("watch ", 0) == 0) {  // hardware watchpoint (datawatch.h)
-        datawatch::command(line.substr(6));
-        continue;
-      }
-      if (line.rfind("fps ", 0) == 0) {  // "fps N|console|display|unlimited": frame limit (config.h)
-        if (!parse_fps_limit(line.substr(4), &cfg().fps_limit)) LOG_W("pad", "control: '%s': not a frame limit", line.c_str());
-        continue;
-      }
-      if (line == "vsync on" || line == "vsync off") {
-        cfg().vsync = line == "vsync on";
-        continue;
-      }
-      if (line == "fullscreen on" || line == "fullscreen off") {  // tests: without taking the focus
-        gpu::window_set_fullscreen(line == "fullscreen on", false);
-        continue;
-      }
-      if (line == "shot output") {  // the window's output as presented (present.h)
-        gpu::request_output_capture();
-        continue;
-      }
-      if (line == "window minimize" || line == "window restore") {
-        gpu::window_set_minimized(line == "window minimize");
-        continue;
-      }
-      if (line.rfind("window ", 0) == 0) {  // "window WxH": client size (tests)
-        int w = 0, h = 0;
-        if (std::sscanf(line.c_str() + 7, "%dx%d", &w, &h) == 2 && w >= 160 && h >= 90) gpu::window_set_client_size(w, h);
-        else LOG_W("pad", "control: '%s' is not 'window WxH'", line.c_str());
-        continue;
-      }
-      if (line.rfind("dialog ", 0) == 0) {  // answers for system dialogs (sysdialog.h)
-        sysdlg::queue_answers(line.substr(7));
-        continue;
-      }
-      if (line.rfind("turntrace ", 0) == 0) {  // game_input.h
-        game::turn_trace(std::atoi(line.c_str() + 10));
-        continue;
-      }
-      if (line == "axes") {  // the game's input axes (game_input.h)
-        game::axes_dump();
-        continue;
-      }
-      if (line.rfind("axis ", 0) == 0) {
-        if (!game::axis_command(line.substr(5))) LOG_W("pad", "control: '%s' is not 'axis INPUT VALUE|off'", line.c_str());
-        continue;
-      }
-      if (line.rfind("peek ", 0) == 0) {  // "peek ADDR [N]": N guest floats (and words) at ADDR, live
-        std::istringstream in(line.substr(5));
-        std::string a;
-        u32 n = 1;
-        in >> a >> n;
-        u32 addr = u32(std::strtoul(a.c_str(), nullptr, 0)) & ~3u;
-        n = std::clamp<u32>(n, 1, 64);
-        if (a.empty() || !vm::committed(addr, 4 * n)) {
-          LOG_W("pad", "control: peek '%s': not mapped guest memory", a.c_str());
-          continue;
-        }
-        std::string s;
-        for (u32 i = 0; i < n; ++i) {
-          u32 w = ppu::r32(addr + 4 * i);
-          float f;
-          std::memcpy(&f, &w, 4);
-          s += ac4::strprintf(" %08x(%g)", w, double(f));
-        }
-        LOG_I("pad", "peek 0x%08x:%s", addr, s.c_str());
-        continue;
-      }
-      if (line.rfind("gpu ", 0) == 0) {  // "gpu NAME VALUE": renderer switches for A/B measurements
-        std::istringstream in(line.substr(4));
-        std::string name, value;
-        in >> name >> value;
-        if (!rsx::gpu_option(name, value)) LOG_W("pad", "control: unknown renderer option '%s'", line.c_str());
-        continue;
-      }
-      if (line.rfind("key ", 0) == 0) {  // "key NAME down|up": a host key or mouse button, for testing bindings
-        std::string rest = line.substr(4);
-        size_t sp = rest.rfind(' ');
-        u32 code = sp == std::string::npos ? 0 : bindings::key_code(rest.substr(0, sp));
-        bool down = sp != std::string::npos && rest.substr(sp + 1) == "down";
-        if (code && code < 0x100) input_key_inject(code, down);
-        else if (code >= 0x100 && code < 0x105) input_mouse_button_inject(int(code - 0x100), down);  // Mouse1-Mouse5
-        else LOG_W("pad", "control: '%s' is not 'key <keyboard key or Mouse1-5> down|up'", line.c_str());
-        continue;
-      }
-      std::lock_guard lk(g_script_mu);
-      parse_items(line);
-    }
-  }
-}
-
-void parse_script() {
-  g_script_parsed = true;
-  {
-    std::lock_guard lk(g_script_mu);
-    parse_items(cfg().input_script);
-    if (!g_script.empty()) LOG_I("pad", "--input: %zu scripted press(es) on port 0", g_script.size());
-  }
-  if (!cfg().control_file.empty()) std::thread(control_thread, cfg().control_file).detach();
-}
-
-void apply_script(PadState& s) {
-  if (!g_script_parsed) parse_script();
-  std::lock_guard script_lock(g_script_mu);
-  if (g_script.empty()) return;
-  s.connected = true;
-  double now = double(lv2::system_time_us()) / 1e6;
-  double prev_start = 0;
-  bool prev_done = true;
-  for (auto& p : g_script) {
-    if (p.t < 0 && prev_done) {  // anchored: the first start of the thread after the previous press
-      std::lock_guard lk(g_starts_mu);
-      for (const auto& [name, at] : g_starts)
-        if (name == p.anchor && at >= prev_start) {
-          p.t = at + p.offset;
-          LOG_I("pad", "--input: '%s' started at %.2f s; press due at %.2f s", p.anchor.c_str(), at, p.t);
-          break;
-        }
-    }
-    if (p.t == -2 && prev_done) p.t = prev_start + p.offset;
-    prev_done = p.start >= 0;
-    if (p.start >= 0) prev_start = p.start;
-    // A press starts at the first read after its time, so a game that is not polling at that
-    // moment still sees it.
-    if (p.t < 0 || now < p.t) continue;
-    if (p.start < 0) {
-      p.start = now;
-      if (p.shot) ++gpu::g_capture_requests;
-    }
-    if (p.mx || p.my) {  // the share of the movement due by now
-      double frac = p.hold > 0 ? std::min(1.0, (now - p.start) / p.hold) : 1.0;
-      s64 x = std::llround(double(p.mx) * frac), y = std::llround(double(p.my) * frac);
-      input_mouse_inject(x - p.mx_done, y - p.my_done);
-      p.mx_done = x;
-      p.my_done = y;
-    }
-    if (now >= p.start + p.hold) continue;
-    if (!p.logged) {
-      p.logged = true;
-      LOG_I("pad", "scripted press at %.2f s, read at %.2f s (d1 0x%x d2 0x%x)", p.t, now, p.d1, p.d2);
-    }
-    s.d1 |= p.d1;
-    s.d2 |= p.d2;
-    if (p.lx >= 0) s.lx = u8(p.lx);
-    if (p.ly >= 0) s.ly = u8(p.ly);
-    if (p.rx >= 0) s.rx = u8(p.rx);
-    if (p.ry >= 0) s.ry = u8(p.ry);
-  }
-}
-
 PadState read_port(u32 port) {
   PadState s;
   XINPUT_STATE xs{};
@@ -371,7 +86,7 @@ PadState read_port(u32 port) {
   if (xin) {
     s.connected = true;
     const auto& g = xs.Gamepad;
-    WORD b = g.wButtons;
+    WORD b = ui::pad_suppressed(port, g.wButtons);  // buttons still held from closing PC SETTINGS stay there
     if (b & XINPUT_GAMEPAD_BACK) s.d1 |= SELECT;
     if (b & XINPUT_GAMEPAD_LEFT_THUMB) s.d1 |= L3;
     if (b & XINPUT_GAMEPAD_RIGHT_THUMB) s.d1 |= R3;
@@ -394,6 +109,11 @@ PadState read_port(u32 port) {
     s.ry = u8(255 - axis(g.sThumbRY));
     s.press[10] = g.bLeftTrigger;
     s.press[11] = g.bRightTrigger;
+    // A controller in use hides the menu cursor (a stick past a third of its travel, any button).
+    auto away = [](SHORT v) { return std::abs(int(v)) > 11000; };
+    if (b || g.bLeftTrigger > 30 || g.bRightTrigger > 30 || away(g.sThumbLX) || away(g.sThumbLY) || away(g.sThumbRX) ||
+        away(g.sThumbRY))
+      game::note_pad_input();
   }
   if (port == 0) {
     // Keyboard and mouse bindings (bindings.h; always available on port 0).
@@ -401,12 +121,12 @@ PadState read_port(u32 port) {
     bindings::PadOut k = bindings::sample();
     s.d1 |= k.d1;
     s.d2 |= k.d2;
+    game::menu_pad_bits(&s.d1, &s.d2);  // clicks, right clicks and the wheel in the game's menus
     if (k.lx >= 0) s.lx = u8(k.lx);
     if (k.ly >= 0) s.ly = u8(k.ly);
     if (k.rx >= 0) s.rx = u8(k.rx);
     if (k.ry >= 0) s.ry = u8(k.ry);
   }
-  if (port == 0) apply_script(s);
   auto pr = [](bool on, u8 cur) { return on ? std::max<u8>(cur, 255) : cur; };
   s.press[0] = pr(s.d1 & RIGHT, s.press[0]);
   s.press[1] = pr(s.d1 & LEFT, s.press[1]);
@@ -458,9 +178,14 @@ s32 cellPadGetData(u32 port, Ptr<PadData> data) {
   if (port >= g_max || !data) return PAD_ERR_INVALID_PARAMETER;
   PadState s = read_port(port);
   if (!s.connected) return PAD_ERR_NO_DEVICE;
-  if (sysdlg::active()) {  // a system dialog holds the controller: the game sees it at rest
+  ui::PadMode ui_mode = ui::pad_mode();
+  if (sysdlg::active() || ui_mode != ui::PadMode::Normal) {  // a system dialog or PC SETTINGS holds the controller: the game sees it at rest
     PadState idle;
     idle.connected = true;
+    if (ui_mode == ui::PadMode::Cancel && !sysdlg::active() && port == 0) {  // PC SETTINGS closed: the install question gets CANCEL
+      idle.d2 = CIRCLE;
+      idle.press[5] = 255;
+    }
     s = idle;
   }
   u16 b[24] = {};
@@ -585,12 +310,8 @@ s32 cellMouseGetData(u32 port, u32 data) { return MOUSE_ERR_NO_DEVICE; }
 
 }  // namespace
 
-bool input_quit_requested() { return g_quit; }
-
-void input_thread_started(const std::string& name) {
-  std::lock_guard lk(g_starts_mu);
-  g_starts.push_back({name, double(lv2::system_time_us()) / 1e6});
-}
+bool input_quit_requested() { return false; }
+void input_thread_started(const std::string&) {}
 
 static hle::Module s_module("sys_io", {
     HLE_FN(cellKbClearBuf),

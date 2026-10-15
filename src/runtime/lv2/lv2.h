@@ -119,6 +119,25 @@ inline bool fair_release(FairOwner& o) {
   o.owner = o.queue[pick];
   return true;
 }
+// Removes and returns the waiter a condition signal wakes: highest priority for the priority
+// protocols, otherwise the longest waiting.
+inline u32 pick_waiter(std::vector<u32>& q, u32 protocol) {
+  size_t pick = 0;
+  if (protocol == 2 || protocol == 3) {
+    s32 best = 0x7fffffff;
+    for (size_t i = 0; i < q.size(); ++i) {
+      PpuThread* t = thread_get(q[i]);
+      s32 p = t ? t->prio : 0x7fffffff;
+      if (p < best) {
+        best = p;
+        pick = i;
+      }
+    }
+  }
+  u32 id = q[pick];
+  q.erase(q.begin() + std::ptrdiff_t(pick));
+  return id;
+}
 
 u64 system_time_us();  // microseconds since process start (LV2 system time)
 std::string name8(const void* p);  // 8-byte object names

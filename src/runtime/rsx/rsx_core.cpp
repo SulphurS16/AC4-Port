@@ -3,18 +3,14 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#include <algorithm>
 #include <atomic>
-#include <cmath>
-#include <cstring>
 #include <deque>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 #include "runtime/config.h"
-#include "runtime/gpu/present.h"
-#include "runtime/log.h"
+#include "runtime/gpu/display.h"
 #include "runtime/hle.h"
 #include "runtime/lv2/lv2.h"
 #include "runtime/memory.h"
@@ -35,6 +31,10 @@ std::atomic<u64> g_fifo_idle_us{0};
 
 namespace {
 
+std::atomic<u32> g_get_waiters{0}, g_get_wait_lo{0}, g_get_wait_hi{0};  // wait_get_outside()
+// The FIFO's position in the command ring: GET, or while inside called command lists the
+// outermost return address (the place in the ring it will continue from).
+std::atomic<u32> g_ring_get{0};
 std::mutex g_io_mu;
 u32 g_io_ea[512];   // io >> 20 -> ea >> 20 (0xffffffff = unmapped)
 u32 g_ea_io[4096];  // ea >> 20 -> io >> 20
@@ -85,23 +85,12 @@ std::condition_variable g_vb_cv;
 std::mutex g_db_mu;
 DisplayBuffer g_display[8];
 
+// The emulated vertical blank: from the display's own vblank when its refresh is a multiple of
+// about 60 Hz, else from a 60 Hz clock (gpu/display.h).
 void vblank_thread() {
   SetThreadDescription(GetCurrentThread(), L"rsx-vblank");
-  LARGE_INTEGER f, t0, now;
-  QueryPerformanceFrequency(&f);
-  QueryPerformanceCounter(&t0);
-  const double period = 1001.0 / 60000.0;  // 59.94 Hz
-  u64 n = 0;
   for (;;) {
-    ++n;
-    for (;;) {
-      QueryPerformanceCounter(&now);
-      double el = double(now.QuadPart - t0.QuadPart) / double(f.QuadPart);
-      double left = n * period - el;
-      if (left <= 0) break;
-      if (left > 0.002) lv2::sleep_us(u64((left - 0.001) * 1e6));
-      else _mm_pause();
-    }
+    gpu::display::wait_next_vblank();
     {
       std::lock_guard lk(g_vb_mu);
       g_vblank.fetch_add(1);
@@ -113,81 +102,13 @@ void vblank_thread() {
 
 }  // namespace
 
-namespace {
-// A guest thread waiting for the FIFO to leave a command buffer segment (wait_get_outside).
-std::atomic<bool> g_get_waiting{false};
-std::atomic<u32> g_get_lo{0}, g_get_hi{0};
-HANDLE g_get_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-
-inline void notify_get(u32 get) {
-  if (!g_get_waiting.load(std::memory_order_relaxed)) return;
-  if (get >= g_get_lo.load(std::memory_order_relaxed) && get <= g_get_hi.load(std::memory_order_relaxed)) return;
-  g_get_waiting.store(false, std::memory_order_relaxed);
-  SetEvent(g_get_event);
-}
-}  // namespace
-
-// Timed pacing (do_flip): flips at most N times per second, on an even schedule (a late frame does
-// not make the next ones early: the schedule restarts after a miss). Coarse waits sleep on a
-// high-resolution timer; the last fraction of a millisecond spins for precision.
-std::atomic<s64> g_movie_frame_qpc{0};
-void note_movie_frame() {
-  LARGE_INTEGER now;
-  QueryPerformanceCounter(&now);
-  g_movie_frame_qpc.store(now.QuadPart, std::memory_order_relaxed);
-}
-bool movie_playing() {
-  static LARGE_INTEGER freq{};
-  if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
-  LARGE_INTEGER now;
-  QueryPerformanceCounter(&now);
-  s64 last = g_movie_frame_qpc.load(std::memory_order_relaxed);
-  return last && now.QuadPart - last < freq.QuadPart / 4;  // a frame fetched in the last 250 ms
-}
-
-void pace_flip(double rate) {
-  static LARGE_INTEGER freq{}, next{};
-  if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
-  const s64 period = s64(double(freq.QuadPart) / rate);
-  LARGE_INTEGER now;
-  QueryPerformanceCounter(&now);
-  if (!next.QuadPart || now.QuadPart - next.QuadPart > period) next.QuadPart = now.QuadPart;  // first flip or missed
-  for (;;) {
-    QueryPerformanceCounter(&now);
-    s64 left = next.QuadPart - now.QuadPart;
-    if (left <= 0) break;
-    double us = double(left) * 1e6 / double(freq.QuadPart);
-    if (us > 1500) lv2::sleep_us(u64(us - 1000));
-    else _mm_pause();
-  }
-  next.QuadPart += period;
-}
-
-void wait_get_outside(u32 lo, u32 hi) {
-  auto* ctrl_get = reinterpret_cast<volatile u32*>(ppu::mem() + kControlAddr + 4);
-  auto outside = [&] {
-    u32 get = __builtin_bswap32(*ctrl_get);
-    return get < lo || get > hi;
-  };
-  if (outside()) return;
-  note_block();
-  g_get_lo = lo;
-  g_get_hi = hi;
-  for (;;) {
-    g_get_waiting.store(true, std::memory_order_seq_cst);
-    if (outside()) break;
-    WaitForSingleObject(g_get_event, 2);  // the timeout only guards against a lost wake-up
-  }
-  g_get_waiting.store(false, std::memory_order_relaxed);
-}
-
 void clear_flip_label() {
   ppu::w64(kLabelAddr + 0x10, 0);
   ppu::w64(kLabelAddr + 0x18, 0);
 }
 
 // ---------------------------------------------------------------------------------------------
-// Register reset state (rsx_facts.md ??3-7: the documented defaults). Games rely on registers they
+// Register reset state (rsx_facts.md §3-7: the documented defaults). Games rely on registers they
 // never write, e.g. the front face (CCW) when they enable culling.
 void init_register_defaults() {
   auto set = [](u32 method, u32 v) { g.regs[method >> 2] = v; };
@@ -346,147 +267,16 @@ void set_vblank_handler(u32 opd) { g_vblank_handler = opd; }
 u64 vblank_count() { return g_vblank.load(); }
 
 // ---------------------------------------------------------------------------------------------
-// Flip: pacing (below), hand the buffer to the presenter, update status, notify.
-//
-// Pacing (config.h fps_limit, vsync):
-// - console: at most one flip per vertical blank of the emulated 59.94 Hz display. In hsync mode
-//   the hardware switches buffers at the next scanline, but the display still shows at most one
-//   new frame per refresh; without a model of rendering time, a second flip within the same
-//   refresh period waits for the next vblank (otherwise the game would run its loop several times
-//   per displayed frame).
-// - a rate N that divides the display's refresh rate (60 on a 60, 120 or 240 Hz display, 82.5 or
-//   55 on 165 Hz): locked to the display. Each frame is presented for refresh/N refreshes and the
-//   flip waits until the previous frame is on screen (present.h wait_present_ready), so every
-//   frame stays on screen equally long and the game runs at the display's real rate.
-// - any other rate: flips timed at N per second. Even on a variable-refresh display; a fixed
-//   refresh display shows some frames one refresh longer than others (e.g. 60 on 165 Hz).
-// - display: N = the display's refresh rate. Unlimited: no waiting, no vsync.
-// Movies keep about 60 flips per second: their frames are picked by flip time (at 120 the video
-// stayed black).
-namespace {
-enum class Pace { console, locked, timed, unlimited };
-struct Pacing {
-  Pace pace = Pace::console;
-  double rate = 0;   // flips per second (locked, timed)
-  u32 interval = 1;  // sync interval of the presents
-  double hz = 0;     // the display's refresh rate (0 unknown / headless)
-  bool movie = false;
-  bool operator==(const Pacing&) const = default;
-};
-
-Pacing choose_pacing() {
-  const Config& c = cfg();
-  Pacing p;
-  p.hz = gpu::display_refresh_hz();
-  double limit = c.fps_limit;
-  if (limit == kFpsDisplay) limit = p.hz > 0 ? p.hz : 60;
-  if (limit != kFpsConsole && std::fabs(limit - 60) > 0.1 && movie_playing()) {
-    limit = 60;
-    p.movie = true;
-  }
-  if (limit < 0) {
-    p.interval = c.vsync ? 1 : 0;
-    return p;
-  }
-  if (limit == 0) {
-    p.pace = Pace::unlimited;
-    p.interval = 0;
-    return p;
-  }
-  p.rate = limit;
-  if (c.vsync && p.hz > 0) {
-    double q = p.hz / limit;
-    long k = std::lround(q);
-    if (k >= 1 && k <= 4 && std::fabs(q - double(k)) <= 0.006 * double(k)) {
-      p.pace = Pace::locked;
-      p.interval = u32(k);
-      return p;
-    }
-  }
-  p.pace = Pace::timed;
-  p.interval = c.vsync ? 1 : 0;
-  return p;
-}
-
-void log_pacing(const Pacing& p) {
-  std::string what;
-  switch (p.pace) {
-    case Pace::console:
-      what = "the console's (one flip per emulated 59.94 Hz vblank)";
-      break;
-    case Pace::unlimited:
-      what = "unlimited (no vsync)";
-      break;
-    case Pace::locked:
-      what = ac4::strprintf("%.4g frames/s locked to the display (%.3f Hz, each frame %u refresh%s)", p.rate, p.hz, p.interval,
-                            p.interval > 1 ? "es" : "");
-      break;
-    case Pace::timed: {
-      std::string even;  // rates this display shows evenly
-      for (u32 k = 1; k <= 4 && p.hz > 0; ++k)
-        if (p.hz / k >= 29) even += ac4::strprintf("%s%.4g", even.empty() ? "" : ", ", p.hz / k);
-      what = ac4::strprintf("%.4g frames/s timed (display %.3f Hz%s%s)", p.rate, p.hz,
-                            even.empty() ? "" : "; frames stay on screen evenly on a variable-refresh display, or here at ",
-                            even.c_str());
-      break;
-    }
-  }
-  LOG_I("rsx", "pacing: %s%s%s", what.c_str(), p.pace != Pace::unlimited && !cfg().vsync ? ", vsync off" : "",
-        p.movie ? " (movie)" : "");
-}
-
-// Waits until the display takes the next frame. After a timeout (window minimized or covered:
-// presents may not complete) flips are timed instead for a second.
-bool display_wait(const Pacing& p) {
-  static double fallback_until = 0;
-  static int logged = 0;
-  double now = log_time();
-  if (now < fallback_until) return false;
-  u32 timeout = u32(std::clamp(4000.0 / p.rate, 20.0, 200.0));  // about four frames
-  if (gpu::wait_present_ready(timeout)) return true;
-  fallback_until = now + 1.0;
-  if (logged < 20) {
-    ++logged;
-    LOG_I("rsx", "pacing: the display took no frame for %u ms (window minimized or covered?); flips timed for 1 s", timeout);
-  }
-  return false;
-}
-}  // namespace
-
+// Flip: wait for vblank (vsync mode), hand the buffer to the presenter, update status, notify.
+// In hsync mode the hardware switches buffers at the next scanline; the display still shows at
+// most one new frame per refresh, and the RSX's rendering time kept the game far below that rate.
+// Without a model of rendering time, a second flip within the same refresh period waits for the
+// next vblank (otherwise the game would run its loop several times per displayed frame).
 void do_flip(u32 id) {
-  if (double ms = cfg().present_delay_ms; ms > 0) {  // diagnostics: a slow GPU, i.e. a low frame rate
-    if (static bool logged = false; !logged) {
-      logged = true;
-      LOG_W("rsx", "--present-delay: every flip waits %.1f ms more (diagnostics, not for play)", ms);
-    }
-    lv2::sleep_us(u64(ms * 1000));
-  }
-  static Pacing last;
-  static bool have_last = false;
-  Pacing p = choose_pacing();
-  if (!have_last || !(p == last)) {
-    log_pacing(p);
-    last = p;
-    have_last = true;
-  }
-  gpu::set_present_interval(p.interval);
-  switch (p.pace) {
-    case Pace::console:
-      if (g_flip_mode.load() == 1 || g_flip_vblank == g_vblank.load()) {
-        std::unique_lock lk(g_vb_mu);
-        u64 v = g_vblank.load();
-        g_vb_cv.wait_for(lk, std::chrono::milliseconds(50), [&] { return g_vblank.load() != v; });
-      }
-      break;
-    case Pace::locked:
-      if (!display_wait(p)) pace_flip(p.rate);
-      break;
-    case Pace::timed:
-      pace_flip(p.rate);
-      if (p.interval && p.hz > 0) display_wait(p);  // never more than one frame queued for the display
-      break;
-    case Pace::unlimited:
-      break;
+  if (g_flip_mode.load() == 1 || g_flip_vblank == g_vblank.load()) {
+    std::unique_lock lk(g_vb_mu);
+    u64 v = g_vblank.load();
+    g_vb_cv.wait_for(lk, std::chrono::milliseconds(50), [&] { return g_vblank.load() != v; });
   }
   g_flip_vblank = g_vblank.load();
   DisplayBuffer b;
@@ -506,9 +296,53 @@ void do_flip(u32 id) {
 // FIFO
 namespace {
 
+// Recent FIFO control flow (jumps, calls, returns, new PUT values) for the report on the first
+// invalid command: which path led the FIFO into data that is not a command.
+struct FlowEvent {
+  char kind;  // 'J' jump, 'C' call, 'R' return, 'P' new put
+  u32 at, to;
+  u64 t_us;
+};
+FlowEvent g_flow[64];
+u32 g_flow_n = 0;
+u32 g_ring_lo = 0, g_ring_hi = 0;  // the default command buffer's fragments (io offsets)
+void flow(char kind, u32 at, u32 to) {
+  g_flow[g_flow_n++ & 63] = {kind, at, to, lv2::system_time_us()};
+}
+
+void flow_report(const char* why, u32 get, u32 put) {
+  static bool once = false;
+  if (once) return;
+  once = true;
+  u32 ctx = kContextAddr;
+  LOG_E("rsx", "FIFO report (%s): get 0x%08x put 0x%08x; libgcm context begin 0x%08x end 0x%08x current 0x%08x", why, get, put,
+        ppu::r32(ctx), ppu::r32(ctx + 4), ppu::r32(ctx + 8));
+  u64 now = lv2::system_time_us();
+  for (u32 i = g_flow_n > 64 ? g_flow_n - 64 : 0; i < g_flow_n; ++i) {
+    const FlowEvent& e = g_flow[i & 63];
+    LOG_E("rsx", "  %c at 0x%08x -> 0x%08x (%.3f ms ago)", e.kind, e.at, e.to, double(now - e.t_us) / 1000.0);
+  }
+}
+
+}  // namespace
+
+void fifo_desync(const char* why, u32 value) {
+  u32 n = g_method_pos.load(std::memory_order_relaxed);
+  for (u32 i = n > 32 ? n - 32 : 0; i < n; ++i)
+    LOG_E("rsx", "  method 0x%04x = 0x%08x", g_method_ring[i & 31][0], g_method_ring[i & 31][1]);
+  std::string what = ac4::strprintf("%s (0x%08x)", why, value);
+  flow_report(what.c_str(), __builtin_bswap32(*reinterpret_cast<volatile u32*>(ppu::mem() + kControlAddr + 4)), ppu::r32(kControlAddr));
+  fatal("RSX FIFO desynchronized: " + what);
+}
+
+namespace {
+
 u32 fifo_read(u32 io) {
   u32 ea;
-  if (!io_to_ea(io, &ea)) fatal(ac4::strprintf("RSX FIFO fetch from unmapped io offset 0x%08x", io));
+  if (!io_to_ea(io, &ea)) {
+    flow_report("fetch from an unmapped io offset", io, ppu::r32(kControlAddr));
+    fatal(ac4::strprintf("RSX FIFO fetch from unmapped io offset 0x%08x", io));
+  }
   return ppu::r32(ea);
 }
 
@@ -520,12 +354,18 @@ void fifo_thread() {
   auto* ctrl_put = reinterpret_cast<volatile u32*>(ppu::mem() + kControlAddr);
   auto* ctrl_get = reinterpret_cast<volatile u32*>(ppu::mem() + kControlAddr + 4);
   u32 get = __builtin_bswap32(*ctrl_get);
-  const bool trace_methods = cfg().trace_rsx > 0;  // --trace-rsx logs every method: no burst shortcuts
+  g_ring_get.store(get);
   std::vector<u32> call_stack;
-  u32 idle = 0;
+  const bool trace_methods = cfg().trace_rsx != 0;  // --trace-rsx logs every method: no bulk paths
+  init_method_kinds();
+  u32 idle = 0, last_put = ~0u;
   u64 idle_since = 0;
   for (;;) {
     u32 put = __builtin_bswap32(*ctrl_put);
+    if (put != last_put) {
+      flow('P', get, put);
+      last_put = put;
+    }
     if (get == g_covered_put) renderer_guest_sync();
     if (get == put) {
       if (idle == 0) idle_since = lv2::system_time_us();
@@ -541,15 +381,19 @@ void fifo_thread() {
     idle = 0;
     u32 cmd = fifo_read(get);
     if ((cmd & 0xe0000003) == 0x20000000) {  // old jump
+      flow('J', get, cmd & 0x1ffffffc);
       get = cmd & 0x1ffffffc;
     } else if ((cmd & 3) == 1) {  // new jump
+      flow('J', get, cmd & 0xfffffffc);
       get = cmd & 0xfffffffc;
     } else if ((cmd & 3) == 2) {  // call
       if (call_stack.size() > 16) fatal("RSX FIFO call stack overflow");
+      flow('C', get, cmd & 0xfffffffc);
       call_stack.push_back(get + 4);
       get = cmd & 0xfffffffc;
     } else if ((cmd & 0xffff0003) == 0x00020000) {  // return
       if (call_stack.empty()) fatal(ac4::strprintf("RSX FIFO return with empty call stack at 0x%08x", get));
+      flow('R', get, call_stack.back());
       get = call_stack.back();
       call_stack.pop_back();
     } else if (cmd == 0) {
@@ -561,46 +405,103 @@ void fifo_thread() {
       bool inc = (cmd & 0xe0030003) == 0;
       if (!inc && !noinc) {
         LOG_E("rsx", "unknown FIFO command 0x%08x at io 0x%08x; skipping", cmd, get);
+        flow_report("invalid command", get, put);
         get += 4;
       } else {
         u32 args_io = get + 4;
         get += 4 + 4 * count;
-        // Arguments in one IO page (all but commands crossing a 1 MiB boundary): one translation.
-        const u8* args = nullptr;
+        // The arguments through one host pointer when they lie in one io page (nearly always).
         u32 args_ea;
-        if (count && (args_io >> 20) == ((args_io + 4 * count - 4) >> 20) && io_to_ea(args_io, &args_ea))
-          args = ppu::mem() + args_ea;
+        const u8* args = count && (args_io >> 20) == ((args_io + 4 * count - 1) >> 20) && io_to_ea(args_io, &args_ea)
+                             ? ppu::mem() + args_ea
+                             : nullptr;
         if (args && inc && method >= m::SET_TRANSFORM_CONSTANT && method + 4 * count <= m::SET_TRANSFORM_CONSTANT + 0x80 &&
             !trace_methods) {
-          // Vertex constants, the bulk of heavy scenes' methods: one call for the burst.
-          for (u32 i = 0; i < count; ++i) {
-            u32 v;
-            std::memcpy(&v, args + 4 * i, 4);
-            g.regs[(method >> 2) + i] = __builtin_bswap32(v);
-          }
-          renderer_constants((method - m::SET_TRANSFORM_CONSTANT) >> 2, args, count);
+          renderer_transform_constants(args, (method - m::SET_TRANSFORM_CONSTANT) >> 2, count);
+          for (u32 i = 0; i < count; ++i) g.regs[(method >> 2) + i] = __builtin_bswap32(reinterpret_cast<const u32*>(args)[i]);
         } else {
           for (u32 i = 0; i < count; ++i) {
-            u32 m = noinc ? method : method + 4 * i;
-            u32 arg;
-            if (args) {
-              std::memcpy(&arg, args + 4 * i, 4);
-              arg = __builtin_bswap32(arg);
-            } else {
-              arg = fifo_read(args_io + 4 * i);
+            u32 mi = noinc ? method : method + 4 * i;
+            u32 arg = args ? __builtin_bswap32(reinterpret_cast<const u32*>(args)[i]) : fifo_read(args_io + 4 * i);
+            if (!g_method_special[mi >> 2] && !trace_methods) {  // plain state: the register write only
+              record_method(mi, arg);
+              g.regs[mi >> 2] = arg;
+              continue;
             }
-            execute_method(m >> 2, arg, count, i);
+            execute_method(mi >> 2, arg, count, i);
           }
         }
         bump(g.commands);
       }
     }
     *ctrl_get = __builtin_bswap32(get);
-    notify_get(get);
+    u32 ring = call_stack.empty() ? get : call_stack.front();
+    g_ring_get.store(ring, std::memory_order_release);
+    if (g_get_waiters.load(std::memory_order_acquire)) {
+      u32 lo = g_get_wait_lo.load(std::memory_order_relaxed), hi = g_get_wait_hi.load(std::memory_order_relaxed);
+      if ((ring < lo || ring > hi) && (get < lo || get > hi)) WakeByAddressAll(&g_ring_get);
+    }
   }
 }
 
 }  // namespace
+
+// A PPU thread waiting for the FIFO to leave the command ring range [lo, hi] (io offsets): libgcm's
+// fragment callback, before the game overwrites the next fragment. The FIFO's position in the ring
+// counts, not GET alone: while the FIFO runs a command list CALLed from that fragment, GET is
+// elsewhere but the FIFO returns into the fragment afterwards (releasing it then let the game
+// overwrite commands the FIFO had yet to finish: it resumed in the middle of new commands and
+// executed their arguments, run 20261012-161028). The thread sleeps until the FIFO thread wakes
+// it (instead of a Sleep(0) loop that kept a core busy for the whole wait).
+void wait_get_outside(u32 lo, u32 hi) {
+  auto* ctrl_get = reinterpret_cast<volatile u32*>(ppu::mem() + kControlAddr + 4);
+  // Released when neither the ring position nor GET itself (a command list inside the range,
+  // called from elsewhere) is in the range.
+  auto released = [&](u32 ring) {
+    u32 get = __builtin_bswap32(*ctrl_get);
+    return (ring < lo || ring > hi) && (get < lo || get > hi);
+  };
+  if (cfg().gcm_wait_spin) {  // --gcm-wait spin: a Sleep(0) loop (A/B comparisons)
+    for (u32 spins = 0; !released(g_ring_get.load(std::memory_order_acquire)); ++spins)
+      if (spins > 64) Sleep(0);
+    return;
+  }
+  for (u32 spins = 0; spins < 64; ++spins) {
+    if (released(g_ring_get.load(std::memory_order_acquire))) return;
+    _mm_pause();
+  }
+  g_get_wait_lo.store(lo, std::memory_order_relaxed);
+  g_get_wait_hi.store(hi, std::memory_order_relaxed);
+  g_get_waiters.fetch_add(1, std::memory_order_acq_rel);
+  bool hazard = false;
+  for (;;) {
+    u32 seen = g_ring_get.load(std::memory_order_acquire);
+    if (released(seen)) break;
+    u32 get = __builtin_bswap32(*ctrl_get);
+    if (!hazard && (get < lo || get > hi)) {  // GET alone would have released the fragment
+      hazard = true;
+      static std::atomic<u32> n{0};
+      u32 k = ++n;
+      if (k <= 3 || (k & (k - 1)) == 0)
+        LOG_I("rsx", "fragment wait: GET 0x%08x is outside [0x%08x, 0x%08x] but the FIFO returns into it (ring position 0x%08x): "
+              "kept waiting (%u so far)", get, lo, hi, seen, k);
+      if (k == 1) {  // the FIFO's recent control flow (diagnostics; read while the FIFO thread runs)
+        u32 n = g_flow_n;
+        for (u32 i = n > 12 ? n - 12 : 0; i < n; ++i) {
+          const FlowEvent e = g_flow[i & 63];
+          LOG_I("rsx", "  flow %c at 0x%08x -> 0x%08x", e.kind, e.at, e.to);
+        }
+      }
+    }
+    WaitOnAddress(&g_ring_get, &seen, sizeof seen, 2);
+  }
+  g_get_waiters.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+void set_ring(u32 io_lo, u32 io_hi) {
+  g_ring_lo = io_lo;
+  g_ring_hi = io_hi;
+}
 
 void start() {
   auto* ctrl = reinterpret_cast<u32*>(ppu::mem() + kControlAddr);
@@ -611,8 +512,7 @@ void start() {
   LOG_I("rsx", "RSX threads started");
 }
 
-extern std::atomic<u32> g_acquire_ea, g_acquire_value, g_method_pos;
-extern u32 g_method_ring[32][2];
+extern std::atomic<u32> g_acquire_ea, g_acquire_value;
 
 void dump() {
   u32 put = ppu::r32(kControlAddr), get = ppu::r32(kControlAddr + 4), ref = ppu::r32(kControlAddr + 8);

@@ -20,6 +20,7 @@ struct Mount {
   std::string prefix;  // e.g. "/dev_bdvd"
   fs::path host;
   bool writable;
+  std::vector<std::string> parts;  // the prefix's components
 };
 std::vector<Mount> g_mounts;
 fs::path g_disc, g_overlay;  // test overlay over the disc (vfs.h)
@@ -68,17 +69,28 @@ s32 win_err(DWORD e) {
 }  // namespace
 
 void init(const std::string& disc, const std::string& hdd0, const std::string& hdd1, const std::string& flash,
-          const std::string& test_overlay) {
+          const std::string& saves, const std::string& test_overlay) {
   g_disc = fs::path(disc);
   g_overlay = test_overlay.empty() ? fs::path() : fs::path(test_overlay);
   if (!g_overlay.empty()) LOG_W("vfs", "TEST OVERLAY %s: its files replace disc files (test aid)", test_overlay.c_str());
   g_mounts = {
-      {"/dev_bdvd", fs::path(disc), false},
-      {"/app_home", fs::path(disc) / "PS3_GAME" / "USRDIR", false},
-      {"/dev_hdd0", fs::path(hdd0), true},
-      {"/dev_hdd1", fs::path(hdd1), true},
-      {"/dev_flash", fs::path(flash), false},
+      {"/dev_bdvd", fs::path(disc), false, {}},
+      {"/app_home", fs::path(disc) / "PS3_GAME" / "USRDIR", false, {}},
+      {"/dev_hdd0", fs::path(hdd0), true, {}},
+      {"/dev_hdd1", fs::path(hdd1), true, {}},
+      {"/dev_flash", fs::path(flash), false, {}},
   };
+  if (!saves.empty()) {
+    g_mounts.push_back({"/dev_hdd0/home/00000001/savedata", fs::path(saves), true, {}});
+    fs::create_directories(saves);
+  }
+  for (Mount& m : g_mounts) {
+    for (size_t i = 1; i <= m.prefix.size();) {
+      size_t j = std::min(m.prefix.find('/', i), m.prefix.size());
+      m.parts.push_back(m.prefix.substr(i, j - i));
+      i = j + 1;
+    }
+  }
   fs::create_directories(hdd0);
   fs::create_directories(hdd1);
 }
@@ -100,28 +112,31 @@ bool resolve(const std::string& gp, Resolved& out) {
     i = j + 1;
   }
   if (parts.empty()) return false;
-  std::string mount = "/" + parts[0];
+  const Mount* best = nullptr;  // the longest mount prefix that matches whole components
   for (const auto& m : g_mounts) {
-    if (_stricmp(m.prefix.c_str(), mount.c_str()) != 0) continue;
-    fs::path h = m.host;
-    for (size_t k = 1; k < parts.size(); ++k) {
-      if (parts[k].find(':') != std::string::npos || parts[k].find('\\') != std::string::npos) return false;
-      h /= fs::u8path(parts[k]);
-    }
-    out = {h, m.writable, m.prefix};
-    if (!g_overlay.empty() && !m.writable && (m.prefix == "/dev_bdvd" || m.prefix == "/app_home")) {
-      std::error_code ec;
-      fs::path rel = h.lexically_relative(g_disc);
-      fs::path o = g_overlay / rel;
-      if (!rel.empty() && *rel.begin() != ".." && fs::is_regular_file(o, ec)) {
-        out.host = o;
-        std::lock_guard lk(g_overlay_mu);
-        if (g_overlaid.insert(o.string()).second) LOG_W("vfs", "TEST OVERLAY: %s read from %s", gp.c_str(), o.string().c_str());
-      }
-    }
-    return true;
+    if (m.parts.size() > parts.size() || (best && m.parts.size() <= best->parts.size())) continue;
+    bool match = true;
+    for (size_t k = 0; k < m.parts.size() && match; ++k) match = _stricmp(m.parts[k].c_str(), parts[k].c_str()) == 0;
+    if (match) best = &m;
   }
-  return false;
+  if (!best) return false;
+  fs::path h = best->host;
+  for (size_t k = best->parts.size(); k < parts.size(); ++k) {
+    if (parts[k].find(':') != std::string::npos || parts[k].find('\\') != std::string::npos) return false;
+    h /= fs::path(std::u8string(parts[k].begin(), parts[k].end()));  // guest paths are UTF-8
+  }
+  out = {h, best->writable, best->prefix};
+  if (!g_overlay.empty() && !best->writable && (best->prefix == "/dev_bdvd" || best->prefix == "/app_home")) {
+    std::error_code ec;
+    fs::path rel = h.lexically_relative(g_disc);
+    fs::path o = g_overlay / rel;
+    if (!rel.empty() && *rel.begin() != ".." && fs::is_regular_file(o, ec)) {
+      out.host = o;
+      std::lock_guard lk(g_overlay_mu);
+      if (g_overlaid.insert(o.string()).second) LOG_W("vfs", "TEST OVERLAY: %s read from %s", gp.c_str(), o.string().c_str());
+    }
+  }
+  return true;
 }
 
 static s32 resolve_for(const std::string& path, bool want_write, Resolved& r) {

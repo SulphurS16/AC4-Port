@@ -80,6 +80,7 @@ void bind_imports(u32 begin, u32 end, size_t* total, size_t* unimpl, size_t* unk
           imp.name = r.name;
           imp.fn = r.fn;
           if (!r.fn && unimpl) ++*unimpl;
+          if (!r.fn) LOG_I("loader", "import %s::%s is not implemented (traps if called)", mod.c_str(), r.name.c_str());
         } else {
           imp.name = ac4::strprintf("unknown_%08x", fnid);
           LOG_I("loader", "import %s::%08x has no implementation (traps if called)", mod.c_str(), fnid);

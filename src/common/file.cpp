@@ -10,8 +10,6 @@ namespace ac4 {
 namespace {
 
 std::mutex g_mu;
-std::vector<std::wstring> g_protected = {
-};
 
 std::wstring norm(const fs::path& p) {
   std::error_code ec;
@@ -24,6 +22,13 @@ std::wstring norm(const fs::path& p) {
   while (s.size() > 3 && s.back() == L'\\') s.pop_back();
   return s;
 }
+
+// Built-in protected roots: the game folder inside the project root (tools run from the root)
+// and, on the development PC, the read/copy-only reference projects and the Manager's records.
+// Each tool also adds the game folders it is given at runtime.
+std::vector<std::wstring> g_protected = {
+    norm(fs::current_path() / "Armored Core 4 (USA)"),
+};
 
 }  // namespace
 

@@ -62,7 +62,7 @@ void gcm_callback(ppu::Ctx& ctx) {
   c->begin = nb;
   c->current = nb;
   c->end = ne;
-  // Wait until the RSX is outside the new fragment (a blocking wait woken by the FIFO thread).
+  // Wait until the RSX is outside the new fragment.
   rsx::wait_get_outside(offset_of(nb), offset_of(ne));
   ctx.r[3] = CELL_OK;
 }
@@ -78,6 +78,7 @@ s32 _cellGcmInitBody(Ptr<be32> context, u32 cmd_size, u32 io_size, u32 io_addres
   g_io_size = io_size;
   g_cmd_begin = io_address;
   g_cmd_fragments = std::max<u32>(1, cmd_size / (32 * 1024));
+  rsx::set_ring(4096, g_cmd_fragments * 32 * 1024);
   if (!g_context_opd) g_context_opd = hle_internal_opd("cellGcmCallback", gcm_callback);
   Ptr<ContextData> c(rsx::kContextAddr);
   c->begin = io_address + 4096;
@@ -167,8 +168,31 @@ void cellGcmSetZcull(ppu::Ctx& ctx) {
         (unsigned long long)ctx.r[10], u32(ppu::r64(sp + 0x70)), u32(ppu::r64(sp + 0x78)), u32(ppu::r64(sp + 0x80)),
         u32(ppu::r64(sp + 0x88)));
 }
-// Old-API flip: writes GCM_FLIP_COMMAND(id) at the context's current pointer.
-void _cellGcmSetFlipCommand(Ptr<ContextData> c, u32 id) {
+// Old-API flip: writes GCM_FLIP_COMMAND(id) at the context's current pointer, after reserving its
+// two words as libgcm does: when they do not fit before the context's end (its last word is the
+// jump slot), the buffer callback first moves on to the next fragment. Writing past the end put
+// the flip into the jump slot and the next fragment's first word, and the callback then wrote its
+// jump inside that fragment without waiting for the FIFO to leave it: when the FIFO lagged a ring
+// lap behind (loading), it executed those words as commands (FIFO desync at the title -> hub
+// transition: player test run 20261013-134934).
+void _cellGcmSetFlipCommand(ppu::Ctx& ctx, Ptr<ContextData> c, u32 id) {
+  if (u32(c->current) + 8 > u32(c->end)) {
+    static std::atomic<u32> n{0};
+    u32 k = ++n;
+    if (k <= 3 || (k & (k - 1)) == 0)
+      LOG_I("gcm", "flip command at the end of a fragment (current 0x%08x, end 0x%08x): buffer callback first (%u so far)",
+            u32(c->current), u32(c->end), k);
+    if (u32(c->callback) == g_context_opd) {
+      u64 r3 = ctx.r[3], r4 = ctx.r[4];
+      ctx.r[3] = c.addr;
+      ctx.r[4] = 2;
+      gcm_callback(ctx);
+      ctx.r[3] = r3;
+      ctx.r[4] = r4;
+    } else {
+      hle::call_guest(ctx, c->callback, {c.addr, 2});
+    }
+  }
   u32 cur = c->current;
   ppu::w32(cur, (1u << 18) | rsx::m::GCM_FLIP_COMMAND);
   ppu::w32(cur + 4, id);
@@ -192,9 +216,8 @@ s32 cellGcmSetFlip(ppu::Ctx& ctx, u32 c, u32 id) {
   if (id > 7) return CELL_GCM_ERROR_FAILURE;
   static std::atomic<u32> last_site{0};  // diagnostics: the game's present path(s)
   if (u32 lr = u32(ctx.lr); last_site.exchange(lr) != lr) LOG_I("gcm", "cellGcmSetFlip from 0x%08x (context 0x%08x)", lr, c);
-  if (!reserve(ctx, c, 2)) return CELL_GCM_ERROR_FAILURE;
   Ptr<ContextData> cd(c);
-  _cellGcmSetFlipCommand(cd, id);
+  _cellGcmSetFlipCommand(ctx, cd, id);  // reserves its two words (the buffer callback when they do not fit)
   if (c == rsx::kContextAddr) {
     u32 put = offset_of(cd->current);
     reinterpret_cast<std::atomic<u32>*>(ppu::mem() + rsx::kControlAddr)->store(__builtin_bswap32(put));

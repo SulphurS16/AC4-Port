@@ -9,7 +9,9 @@ namespace rt::gpu {
 
 // State the translation depends on (part of the shader cache key).
 struct FpEnv {
-  u8 tex_dim[16] = {};      // 0 none, 1 1D, 2 2D, 3 3D, 4 cube (from the bound texture FORMAT)
+  // 0 none, 1 1D, 2 2D, 3 3D, 4 cube (from the bound texture FORMAT), 5 2D depth compare (a depth
+  // format with a compare function: the fetch returns the shadow test, see renderer.cpp)
+  u8 tex_dim[16] = {};
   u8 mrt_count = 1;         // color outputs (1..4)
   bool fp32_exports = true; // SHADER_CONTROL bit 6: colors from R0/R2/R3/R4, else H0/H4/H6/H8
   bool depth_export = false;

@@ -1,0 +1,8 @@
+# Pinned toolchain that builds the port (tools\bootstrap.ps1 and the launcher download these
+# archives, check their SHA-256 and unpack them into <data>\tools; nothing is installed system-wide).
+# Columns: name sha256 unpack-into check-folder path-folder use url
+#   unpack-into / check-folder / path-folder are relative to <data>\tools ("." = tools itself);
+#   use: build (needed to build the game) or dev (development scripts only).
+llvm-mingw 1bcf74d06b724aeecaa6412ca85f5b26fb1da770e7cdcefa9263c9c5c3ad34b6 . llvm-mingw-20260908-ucrt-x86_64 llvm-mingw-20260908-ucrt-x86_64/bin build https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-ucrt-x86_64.zip
+cmake 4d52ebab7193a698651639ed80d8d04fd903358843572cf44c7fd234cb7c26ab . cmake-4.4.3-windows-x86_64 cmake-4.4.3-windows-x86_64/bin build https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-windows-x86_64.zip
+ninja 07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65 ninja ninja ninja build https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip

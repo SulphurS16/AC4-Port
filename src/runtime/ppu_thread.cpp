@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "ppu/ppu_recomp.h"
+#include "runtime/game/frame_policy.h"
 #include "runtime/hle.h"
 #include "runtime/input.h"
 #include "runtime/log.h"
@@ -58,6 +59,7 @@ DWORD WINAPI thread_main(LPVOID p) {
   }
   t->cv.notify_all();
   LOG_I("thread", "thread 0x%x '%s' exited (status 0x%llx)", t->id, t->name.c_str(), (unsigned long long)status);
+  game::thread_exited(t->name);
   if (t->tls_block) tls_free(t->tls_block);
   return 0;
 }
@@ -210,6 +212,7 @@ s32 thread_start(u32 id) {
   LOG_I("thread", "thread 0x%x '%s' started (entry opd 0x%x, prio %d, stack 0x%x+0x%x, tls 0x%x)", t->id, t->name.c_str(),
         t->entry_opd, t->prio, t->stack_addr, t->stack_size, t->tls_block);
   input_thread_started(t->name);  // anchors for scripted input
+  game::thread_started(t->name);   // frame rate policy (game/frame_policy.h)
   if (handoff) {
     std::unique_lock lk(t->mu);
     if (!t->cv.wait_for(lk, std::chrono::milliseconds(20), [&] { return !t->handoff.load(); })) {

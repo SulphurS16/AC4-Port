@@ -1,7 +1,6 @@
 #include "runtime/gpu/d3d11_device.h"
 
 #include <d3dcompiler.h>
-#include <dxgi1_3.h>
 #include <dxgi1_5.h>
 
 #include <algorithm>
@@ -11,30 +10,33 @@
 #include <filesystem>
 #include <mutex>
 #include <set>
-#include <thread>
 
 #include "common/crypto.h"
 #include "common/file.h"
 #include "runtime/config.h"
-#include "runtime/gpu/png.h"
-#include "runtime/gpu/present.h"
+#include "runtime/gpu/display.h"
 #include "runtime/log.h"
+#include "runtime/ui/overlay.h"
 
 namespace rt::gpu {
 namespace {
 
 Device g_dev;
+HWND g_hwnd = nullptr;
+bool g_tearing = false;  // the swap chain was created with DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
 ID3D11VertexShader* g_blit_vs = nullptr;
 ID3D11PixelShader* g_blit_ps = nullptr;
 ID3D11SamplerState* g_linear = nullptr;
 ID3D11Texture2D* g_last = nullptr;  // copy of the last presented frame (for captures)
 u32 g_last_w = 0, g_last_h = 0;
-HWND g_hwnd = nullptr;
-HANDLE g_latency_wait = nullptr;  // the swap chain's frame latency waitable object
-UINT g_swap_flags = 0;
-bool g_tearing = false;           // DXGI_PRESENT_ALLOW_TEARING supported
-std::atomic<u32> g_interval{1};   // sync interval of the next presents (set_present_interval)
-std::atomic<int> g_output_shots{0};
+ID3D11Texture2D* g_ui_copy = nullptr;  // the composed back buffer while PC SETTINGS is open (captures)
+u32 g_ui_w = 0, g_ui_h = 0;
+// Exclusive fullscreen: requested by any thread, carried out on the presenting thread.
+std::atomic<int> g_excl_request{-1};  // -1 none, 0 leave, 1 enter
+std::atomic<u32> g_excl_w{0}, g_excl_h{0}, g_excl_hz{0};
+std::atomic<bool> g_exclusive{false};
+bool g_excl_wanted = false;  // presenting thread: the mode is fullscreen (re-entered after Alt+Tab)
+std::chrono::steady_clock::time_point g_excl_retry;
 
 const char* kBlitHlsl = R"(
 Texture2D t0 : register(t0);
@@ -137,10 +139,13 @@ bool device_init(void* hwnd) {
         (unsigned long long)(ad.DedicatedVideoMemory >> 20), g_dev.no_overwrite_srv ? "supported" : "not supported");
   if (hwnd) {
     g_hwnd = static_cast<HWND>(hwnd);
+    RECT rc{};
+    GetClientRect(g_hwnd, &rc);
+    if (rc.right > 0 && rc.bottom > 0) g_dev.width = u32(rc.right), g_dev.height = u32(rc.bottom);
     IDXGIFactory2* fac = nullptr;
     adapter->GetParent(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(&fac));
-    // Tearing (sync interval 0 shown at once: no limit without vsync, or a variable-refresh display
-    // in borderless fullscreen) needs the system's support.
+    // Tearing support (DXGI 1.5): needed to present at the game's own rate on variable-refresh
+    // displays (gpu/display.h).
     IDXGIFactory5* fac5 = nullptr;
     BOOL tearing = FALSE;
     if (SUCCEEDED(fac->QueryInterface(__uuidof(IDXGIFactory5), reinterpret_cast<void**>(&fac5)))) {
@@ -148,43 +153,29 @@ bool device_init(void* hwnd) {
       fac5->Release();
     }
     g_tearing = tearing;
-    g_swap_flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | (g_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
-    RECT cr{};
-    if (GetClientRect(g_hwnd, &cr) && cr.right > cr.left && cr.bottom > cr.top) {
-      g_dev.width = u32(cr.right - cr.left);
-      g_dev.height = u32(cr.bottom - cr.top);
-    }
     DXGI_SWAP_CHAIN_DESC1 sd{};
     sd.Width = g_dev.width;
     sd.Height = g_dev.height;
     sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     sd.SampleDesc.Count = 1;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.BufferCount = 3;
+    sd.BufferCount = 2;
     sd.Scaling = DXGI_SCALING_STRETCH;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    sd.Flags = g_swap_flags;
+    sd.Flags = g_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
     hr = fac->CreateSwapChainForHwnd(g_dev.dev, g_hwnd, &sd, nullptr, nullptr, &g_dev.swap);
-    fac->MakeWindowAssociation(g_hwnd, DXGI_MWA_NO_ALT_ENTER);
+    fac->MakeWindowAssociation(g_hwnd, DXGI_MWA_NO_ALT_ENTER);  // the window handles Alt+Enter (borderless fullscreen)
     fac->Release();
     if (FAILED(hr)) {
       LOG_E("gpu", "CreateSwapChainForHwnd failed 0x%08lx", hr);
       return false;
     }
-    // At most one frame waits for the display (present.h wait_present_ready): low latency, and
-    // flips can follow the display's refresh.
-    IDXGISwapChain2* sc2 = nullptr;
-    if (SUCCEEDED(g_dev.swap->QueryInterface(__uuidof(IDXGISwapChain2), reinterpret_cast<void**>(&sc2)))) {
-      sc2->SetMaximumFrameLatency(1);
-      g_latency_wait = sc2->GetFrameLatencyWaitableObject();
-      sc2->Release();
-    }
-    LOG_I("gpu", "swap chain %ux%u (flip model, 3 buffers, maximum frame latency 1%s); tearing %s", g_dev.width, g_dev.height,
-          g_latency_wait ? "" : " NOT available", g_tearing ? "supported" : "not supported");
     ID3D11Texture2D* bb = nullptr;
     g_dev.swap->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb));
     g_dev.dev->CreateRenderTargetView(bb, nullptr, &g_dev.backbuffer_rtv);
     bb->Release();
+    LOG_I("gpu", "swap chain %ux%u, flip model, tearing %s", g_dev.width, g_dev.height, g_tearing ? "supported" : "not supported");
+    display::swapchain_created(g_dev.swap, g_tearing);
   }
   adapter->Release();
   dxdev->Release();
@@ -214,146 +205,102 @@ void report_failure(const char* what, HRESULT hr) {
         removed != S_OK ? ac4::strprintf("; the D3D11 device was removed (reason 0x%08lx)", (unsigned long)removed).c_str() : "");
 }
 
-void request_output_capture() { g_output_shots.fetch_add(1); }
-
-void set_present_interval(u32 k) { g_interval.store(std::min<u32>(k, 4), std::memory_order_relaxed); }
-
-bool wait_present_ready(u32 timeout_ms) {
-  if (!g_latency_wait) return false;
-  return WaitForSingleObjectEx(g_latency_wait, timeout_ms, TRUE) == WAIT_OBJECT_0;
-}
-
-namespace {
-
-// The back buffer as presented (read back at once: diagnostics only).
-void capture_output() {
-  ID3D11Texture2D* bb = nullptr;
-  if (FAILED(g_dev.swap->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb)))) return;
-  std::vector<u8> px;
-  u32 w = 0, h = 0;
-  bool ok = read_back_texture(bb, px, w, h);
-  bb->Release();
-  if (!ok) return;
-  for (size_t i = 0; i + 3 < px.size(); i += 4) std::swap(px[i], px[i + 2]);  // BGRA -> RGBA
-  static u32 n = 0;
-  std::string path = cfg().run_dir + ac4::strprintf("\\output_%04u.png", n++);
-  std::thread([path, w, h, px = std::move(px)] {
-    if (write_png(path, w, h, px)) LOG_I("gpu", "captured %s (%ux%u, the window's output)", path.c_str(), w, h);
-  }).detach();
-}
-
-// The swap chain follows the window's client area (window resized, fullscreen toggled).
-void resize_output() {
-  RECT r{};
-  if (!g_hwnd || !GetClientRect(g_hwnd, &r)) return;
-  u32 w = u32(r.right - r.left), h = u32(r.bottom - r.top);
-  if (!w || !h || (w == g_dev.width && h == g_dev.height)) return;  // minimized, or unchanged
+// The swap chain follows the window's client size (resizing, borderless fullscreen), checked
+// before each present on the presenting thread.
+void resize_to_window() {
+  RECT rc{};
+  if (!g_hwnd || !GetClientRect(g_hwnd, &rc) || rc.right <= 0 || rc.bottom <= 0) return;  // minimized: keep the buffers
+  u32 w = u32(rc.right), h = u32(rc.bottom);
+  if (w == g_dev.width && h == g_dev.height) return;
   g_dev.ctx->OMSetRenderTargets(0, nullptr, nullptr);
   if (g_dev.backbuffer_rtv) g_dev.backbuffer_rtv->Release();
   g_dev.backbuffer_rtv = nullptr;
-  if (HRESULT hr = g_dev.swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, g_swap_flags); FAILED(hr)) {
-    report_failure("swap chain resize", hr);
-  } else {
-    g_dev.width = w;
-    g_dev.height = h;
-    LOG_I("gpu", "output %ux%u", w, h);
-  }
+  HRESULT hr = g_dev.swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, g_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
+  if (FAILED(hr)) report_failure("swap chain resize", hr);
+  else g_dev.width = w, g_dev.height = h;
   ID3D11Texture2D* bb = nullptr;
-  if (SUCCEEDED(g_dev.swap->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb)))) {
+  g_dev.swap->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb));
+  if (bb) {
     g_dev.dev->CreateRenderTargetView(bb, nullptr, &g_dev.backbuffer_rtv);
     bb->Release();
   }
+  LOG_I("gpu", "swap chain resized to %ux%u", g_dev.width, g_dev.height);
 }
 
-// Presentation statistics, logged every 5 s: for how many refreshes of the display each frame
-// stayed on screen (DXGI frame statistics: the refresh each displayed present appeared on). With
-// even pacing every frame stays equally long; a frame that stays longer than the pacing intends
-// is a repeat the player sees. A sample may cover several presents: with sync interval k each
-// frame stays at least k refreshes, so n presents over exactly n*k refreshes all stayed k; other
-// multi-present samples are counted as unresolved. The statistics only advance while the system
-// composes the window: a covered or minimized window (reported as foreground time and occluded
-// presents) is not a pacing measurement.
-struct PresentStats {
-  bool have = false;
-  UINT count = 0, refresh = 0;  // the last displayed present and the refresh it appeared on
-  bool sync = false;
-  UINT sync_refresh0 = 0, sync_refresh1 = 0;  // vblank samples (measured refresh rate)
-  s64 sync_qpc0 = 0, sync_qpc1 = 0;
-  u64 presents = 0, shown[6] = {}, multi = 0, multi_presents = 0, errors = 0, occluded = 0, foreground = 0;
-  u32 intervals = 0;  // bit k: sync interval k used
-  double start = -1;
-};
-PresentStats g_ps;
+namespace {
+// Presenting thread. DXGI sends the window messages while switching; the window thread keeps
+// pumping them (it never waits for this thread).
+void enter_exclusive() {
+  IDXGIOutput* out = nullptr;
+  if (FAILED(g_dev.swap->GetContainingOutput(&out)) || !out) return;
+  DXGI_OUTPUT_DESC od{};
+  out->GetDesc(&od);
+  DXGI_MODE_DESC want{};
+  want.Width = g_excl_w ? g_excl_w.load() : u32(od.DesktopCoordinates.right - od.DesktopCoordinates.left);
+  want.Height = g_excl_h ? g_excl_h.load() : u32(od.DesktopCoordinates.bottom - od.DesktopCoordinates.top);
+  u32 hz = g_excl_hz.load();
+  if (!hz) {
+    DEVMODEW dm{};
+    dm.dmSize = sizeof dm;
+    if (EnumDisplaySettingsW(od.DeviceName, ENUM_CURRENT_SETTINGS, &dm)) hz = dm.dmDisplayFrequency;
+  }
+  want.RefreshRate = DXGI_RATIONAL{hz, hz ? 1u : 0u};
+  want.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+  DXGI_MODE_DESC mode{};
+  if (FAILED(out->FindClosestMatchingMode(&want, &mode, g_dev.dev))) mode = want;
+  g_dev.swap->ResizeTarget(&mode);
+  HRESULT hr = g_dev.swap->SetFullscreenState(TRUE, out);
+  out->Release();
+  if (FAILED(hr)) {  // DXGI_ERROR_NOT_CURRENTLY_AVAILABLE while another window is in front: tried again
+    g_excl_retry = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    LOG_I("gpu", "exclusive fullscreen not available now (0x%08lx); trying again when the window is in front", (unsigned long)hr);
+    return;
+  }
+  mode.RefreshRate = DXGI_RATIONAL{0, 0};  // as DXGI recommends after the switch
+  g_dev.swap->ResizeTarget(&mode);
+  g_exclusive = true;
+  display::set_exclusive(true);
+  LOG_I("gpu", "exclusive fullscreen %ux%u at %.2f Hz", mode.Width, mode.Height,
+        want.RefreshRate.Denominator ? double(want.RefreshRate.Numerator) / want.RefreshRate.Denominator : 0.0);
+}
 
-void present_statistics(u32 interval, HRESULT present_result) {
-  PresentStats& p = g_ps;
-  ++p.presents;
-  p.occluded += present_result == DXGI_STATUS_OCCLUDED;
-  p.foreground += GetForegroundWindow() == g_hwnd;
-  p.intervals |= 1u << std::min<u32>(interval, 7);
-  DXGI_FRAME_STATISTICS st{};
-  HRESULT hr = g_dev.swap->GetFrameStatistics(&st);
-  if (FAILED(hr)) {
-    ++p.errors;
-    p.have = false;
-  } else {
-    if (p.have && st.PresentCount != p.count) {
-      UINT dp = st.PresentCount - p.count, dr = st.PresentRefreshCount - p.refresh;
-      if (dp == 1) {
-        ++p.shown[std::min<UINT>(dr, 5)];
-      } else if (interval >= 1 && interval <= 5 && dr == dp * interval) {
-        p.shown[interval] += dp;
-      } else {
-        ++p.multi;
-        p.multi_presents += dp;
-      }
+void leave_exclusive() {
+  g_dev.swap->SetFullscreenState(FALSE, nullptr);
+  g_exclusive = false;
+  display::set_exclusive(false);
+  LOG_I("gpu", "exclusive fullscreen left");
+}
+
+void update_exclusive() {
+  int req = g_excl_request.exchange(-1);
+  if (req == 0) {
+    g_excl_wanted = false;
+    if (g_exclusive) leave_exclusive();
+    PostMessageW(g_hwnd, WM_APP + 1, 0, 0);  // the window applies its own mode (window.cpp)
+  } else if (req == 1) {
+    g_excl_wanted = true;
+    if (g_exclusive) leave_exclusive();  // another display mode
+    enter_exclusive();
+  } else if (g_excl_wanted) {
+    BOOL fs = FALSE;
+    if (g_exclusive && SUCCEEDED(g_dev.swap->GetFullscreenState(&fs, nullptr)) && !fs) {  // DXGI left it (Alt+Tab)
+      g_exclusive = false;
+      display::set_exclusive(false);
+      LOG_I("gpu", "exclusive fullscreen lost; entered again when the window is in front");
     }
-    if (!p.have || st.PresentCount != p.count) {
-      p.count = st.PresentCount;
-      p.refresh = st.PresentRefreshCount;
-      p.have = true;
-    }
-    if (st.SyncRefreshCount && st.SyncQPCTime.QuadPart) {
-      if (!p.sync) {
-        p.sync = true;
-        p.sync_refresh0 = st.SyncRefreshCount;
-        p.sync_qpc0 = st.SyncQPCTime.QuadPart;
-      }
-      p.sync_refresh1 = st.SyncRefreshCount;
-      p.sync_qpc1 = st.SyncQPCTime.QuadPart;
-    }
+    if (!g_exclusive && GetForegroundWindow() == g_hwnd && std::chrono::steady_clock::now() >= g_excl_retry) enter_exclusive();
   }
-  double now = log_time();
-  if (p.start < 0) p.start = now;
-  if (now - p.start < 5.0) return;
-  std::string ivs;
-  for (u32 k = 0; k < 8; ++k)
-    if (p.intervals & (1u << k)) ivs += ac4::strprintf("%s%u", ivs.empty() ? "" : "/", k);
-  std::string measured = "-";
-  if (p.sync && p.sync_qpc1 > p.sync_qpc0) {
-    LARGE_INTEGER f;
-    QueryPerformanceFrequency(&f);
-    measured = ac4::strprintf("%.2f", double(p.sync_refresh1 - p.sync_refresh0) * double(f.QuadPart) / double(p.sync_qpc1 - p.sync_qpc0));
-  }
-  LOG_I("present",
-        "%.1f s: %llu presents (sync interval %s); frames on screen for 1/2/3/4/5+ refreshes: %llu/%llu/%llu/%llu/%llu, same "
-        "refresh %llu, unresolved %llu samples (%llu presents), statistics unavailable %llu; window in front %.0f%%, occluded "
-        "presents %llu; display %.2f Hz, measured %s Hz",
-        now - p.start, (unsigned long long)p.presents, ivs.c_str(), (unsigned long long)p.shown[1], (unsigned long long)p.shown[2],
-        (unsigned long long)p.shown[3], (unsigned long long)p.shown[4], (unsigned long long)p.shown[5],
-        (unsigned long long)p.shown[0], (unsigned long long)p.multi, (unsigned long long)p.multi_presents,
-        (unsigned long long)p.errors, 100.0 * double(p.foreground) / double(p.presents), (unsigned long long)p.occluded,
-        display_refresh_hz(), measured.c_str());
-  bool have = p.have;
-  UINT count = p.count, refresh = p.refresh;
-  p = PresentStats{};
-  p.have = have;
-  p.count = count;
-  p.refresh = refresh;
-  p.start = now;
 }
 
 }  // namespace
+
+void request_exclusive(bool on, u32 w, u32 h, u32 hz) {
+  g_excl_w = w;
+  g_excl_h = h;
+  g_excl_hz = hz;
+  g_excl_request = on ? 1 : 0;
+}
+bool exclusive_active() { return g_exclusive.load(); }
 
 void present_texture(ID3D11ShaderResourceView* srv, u32 src_w, u32 src_h) {
   auto* c = g_dev.ctx;
@@ -378,8 +325,8 @@ void present_texture(ID3D11ShaderResourceView* srv, u32 src_w, u32 src_h) {
     g_last_w = src_w;
     g_last_h = src_h;
   }
-  auto draw_to = [&](ID3D11RenderTargetView* rtv, float x, float y, float w, float h) {
-    D3D11_VIEWPORT vp{x, y, w, h, 0, 1};
+  auto draw_to = [&](ID3D11RenderTargetView* rtv, u32 w, u32 h, const D3D11_VIEWPORT* fit = nullptr) {
+    D3D11_VIEWPORT vp = fit ? *fit : D3D11_VIEWPORT{0, 0, float(w), float(h), 0, 1};
     c->OMSetRenderTargets(1, &rtv, nullptr);
     c->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     c->OMSetDepthStencilState(nullptr, 0);
@@ -400,28 +347,41 @@ void present_texture(ID3D11ShaderResourceView* srv, u32 src_w, u32 src_h) {
     report_failure("presentation render target view", hr);
     return;
   }
-  draw_to(last_rtv, 0, 0, float(src_w), float(src_h));
+  draw_to(last_rtv, src_w, src_h);
   last_rtv->Release();
   if (g_dev.swap) {
-    resize_output();
-    if (!g_dev.backbuffer_rtv) return;
-    // The PS3's output is 16:9: scaled to fit the window, centred, the rest black.
-    float bw = float(g_dev.width), bh = float(g_dev.height), vw = bw, vh = bh;
-    if (bw * 9 > bh * 16) vw = std::round(bh * 16 / 9);
-    else vh = std::round(bw * 9 / 16);
-    if (vw < bw || vh < bh) {
-      const FLOAT black[4] = {0, 0, 0, 1};
-      c->ClearRenderTargetView(g_dev.backbuffer_rtv, black);
+    update_exclusive();
+    resize_to_window();
+    // Aspect-correct fit: the frame is scaled to the largest centred rectangle with its own
+    // aspect ratio; the rest of the window stays black.
+    float sx = float(g_dev.width) / float(src_w), sy = float(g_dev.height) / float(src_h), s = std::min(sx, sy);
+    float vw = std::floor(float(src_w) * s + 0.5f), vh = std::floor(float(src_h) * s + 0.5f);
+    D3D11_VIEWPORT fit{std::floor((float(g_dev.width) - vw) / 2), std::floor((float(g_dev.height) - vh) / 2), vw, vh, 0, 1};
+    const float black[4] = {0, 0, 0, 1};
+    c->ClearRenderTargetView(g_dev.backbuffer_rtv, black);
+    draw_to(g_dev.backbuffer_rtv, g_dev.width, g_dev.height, &fit);
+    if (ui::is_open()) {  // PC SETTINGS over the game's frame, at the window's resolution
+      ID3D11Texture2D* bb = nullptr;
+      g_dev.swap->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb));
+      if (bb) {
+        c->OMSetRenderTargets(0, nullptr, nullptr);
+        ui::render(g_dev.dev, c, bb, g_dev.width, g_dev.height);
+        if (!g_ui_copy || g_ui_w != g_dev.width || g_ui_h != g_dev.height) {
+          if (g_ui_copy) g_ui_copy->Release();
+          g_ui_copy = nullptr;
+          D3D11_TEXTURE2D_DESC td{};
+          bb->GetDesc(&td);
+          td.BindFlags = 0;
+          td.MiscFlags = 0;
+          td.Usage = D3D11_USAGE_DEFAULT;
+          if (SUCCEEDED(g_dev.dev->CreateTexture2D(&td, nullptr, &g_ui_copy))) g_ui_w = g_dev.width, g_ui_h = g_dev.height;
+        }
+        if (g_ui_copy) c->CopyResource(g_ui_copy, bb);
+        bb->Release();
+      }
     }
-    draw_to(g_dev.backbuffer_rtv, std::floor((bw - vw) / 2), std::floor((bh - vh) / 2), vw, vh);
-    if (g_output_shots.load(std::memory_order_relaxed) > 0) {
-      g_output_shots.fetch_sub(1);
-      capture_output();
-    }
-    u32 k = g_interval.load(std::memory_order_relaxed);
-    HRESULT hr = g_dev.swap->Present(k, k == 0 && g_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
-    if (FAILED(hr)) report_failure("Present", hr);
-    present_statistics(k, hr);
+    g_dev.swap->Present(0, display::present_flags());
+    display::after_present(g_dev.swap);
   }
 }
 
@@ -430,13 +390,16 @@ bool read_back_last_frame(std::vector<u8>& rgba, u32& w, u32& h) { return read_b
 struct PendingCapture {
   ID3D11Texture2D* staging = nullptr;
   u32 index = 0, w = 0, h = 0;
+  bool bgra = false;
 };
 std::vector<PendingCapture> g_captures;
 
 void begin_capture(u32 index) {
-  if (!g_last || g_captures.size() >= 8) return;
+  // While PC SETTINGS is open the capture shows the window as composed (the screen included).
+  ID3D11Texture2D* src = ui::is_open() && g_ui_copy ? g_ui_copy : g_last;
+  if (!src || g_captures.size() >= 8) return;
   D3D11_TEXTURE2D_DESC td{};
-  g_last->GetDesc(&td);
+  src->GetDesc(&td);
   td.Usage = D3D11_USAGE_STAGING;
   td.BindFlags = 0;
   td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -446,10 +409,11 @@ void begin_capture(u32 index) {
     report_failure("capture staging texture", hr);
     return;
   }
-  g_dev.ctx->CopyResource(c.staging, g_last);
+  g_dev.ctx->CopyResource(c.staging, src);
   c.index = index;
   c.w = td.Width;
   c.h = td.Height;
+  c.bgra = td.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
   g_captures.push_back(c);
 }
 
@@ -466,6 +430,11 @@ void poll_captures(const std::function<void(u32 index, std::vector<u8>&& rgba, u
       for (u32 y = 0; y < it->h; ++y)
         std::memcpy(&rgba[size_t(y) * it->w * 4], static_cast<u8*>(ms.pData) + size_t(y) * ms.RowPitch, size_t(it->w) * 4);
       g_dev.ctx->Unmap(it->staging, 0);
+      if (it->bgra)
+        for (size_t i = 0; i < rgba.size(); i += 4) {
+          std::swap(rgba[i], rgba[i + 2]);
+          rgba[i + 3] = 0xff;
+        }
       done(it->index, std::move(rgba), it->w, it->h);
     } else {
       report_failure("capture readback", hr);

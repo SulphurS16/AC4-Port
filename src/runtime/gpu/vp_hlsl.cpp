@@ -8,6 +8,65 @@
 namespace rt::gpu {
 namespace {
 
+// Attribute fetch from raw big-endian guest bytes (vp_hlsl.h VtxFmt); the conversions are the
+// renderer's CPU ones (convert_attr: S16 normalized (x + 0.5) / 32767.5, CMP 11:11:10 / 32767).
+// Kept small: the program calls it once, in a loop over its inputs (inlined per input it made
+// vs_5_0 compiles take 2-4 s instead of ~0.2 s).
+const char* const kVertexFetchHlsl = R"(ByteAddressBuffer vb0 : register(t0);
+ByteAddressBuffer vb1 : register(t1);
+ByteAddressBuffer vb2 : register(t2);
+ByteAddressBuffer vb3 : register(t3);
+cbuffer VtxFmt : register(b2) { uint4 va[16]; float4 vk[16]; };
+uint4 bswap32(uint4 x) { return (x >> 24) | ((x >> 8) & 0xff00) | ((x << 8) & 0xff0000) | (x << 24); }
+uint4 vb_load(uint b, uint a) {
+  uint q = a & ~3u, s = (a & 3) * 8;
+  uint4 w;
+  uint x;
+  [branch] switch (b) {
+    case 0: w = vb0.Load4(q); x = vb0.Load(q + 16); break;
+    case 1: w = vb1.Load4(q); x = vb1.Load(q + 16); break;
+    case 2: w = vb2.Load4(q); x = vb2.Load(q + 16); break;
+    default: w = vb3.Load4(q); x = vb3.Load(q + 16); break;
+  }
+  return s == 0 ? w : (w >> s) | (uint4(w.yzw, x) << (32 - s));
+}
+float4 fetch(uint i, uint k) {
+  uint4 d = va[i];
+  if (((d.w >> 16) & 1) == 0) return vk[i];
+  uint type = d.w & 15, size = (d.w >> 4) & 15;
+  uint kk = k;
+  if (d.z > 1) kk = ((d.w >> 12) & 1) ? k % d.z : k / d.z;
+  if (d.y == 0) kk = 0;
+  uint4 e = vb_load((d.w >> 8) & 3, d.x + kk * d.y);
+  float4 f;
+  [branch] switch (type) {
+    case 2:
+      f = asfloat(bswap32(e));
+      break;
+    case 1:
+    case 3:
+    case 5: {
+      uint4 h = uint4(e.x, e.x >> 16, e.y, e.y >> 16);
+      h = ((h & 0xff) << 8) | ((h >> 8) & 0xff);
+      f = type == 3 ? f16tof32(h) : float4(int4(h << 16) >> 16);
+      if (type == 1) f = (f + 0.5) / 32767.5;
+      break;
+    }
+    case 6: {
+      uint v = bswap32(e).x;
+      f = float4(float3(int3(uint3((v & 0x7ff) << 21, ((v >> 11) & 0x7ff) << 21, ((v >> 22) & 0x3ff) << 22)) >> 16) / 32767.0, 1);
+      size = 3;
+      break;
+    }
+    default:
+      f = float4((e.xxxx >> uint4(0, 8, 16, 24)) & 0xff);
+      if (type == 4) f /= 255.0;
+      break;
+  }
+  return float4(size > 0 ? f.x : 0, size > 1 ? f.y : 0, size > 2 ? f.z : 0, size > 3 ? f.w : 1);
+}
+)";
+
 enum VecOp : u32 {
   V_NOP, V_MOV, V_MUL, V_ADD, V_MAD, V_DP3, V_DPH, V_DP4, V_DST, V_MIN, V_MAX, V_SLT, V_SGE, V_ARL, V_FRC, V_FLR,
   V_SEQ, V_SFL, V_SGT, V_SLE, V_SNE, V_STR, V_SSG, V_TXL = 0x19,
@@ -335,7 +394,7 @@ std::string vp_to_hlsl(const u32* slots, u32 start, VpInfo* info) {
   std::string s;
   s += "cbuffer VpConst : register(b0) { float4 vc[512]; };\n";
   s += "cbuffer VpState : register(b1) { float4 vp_scale; float4 vp_offset; float4 rt_size; uint4 vp_flags; };\n";
-  s += "StructuredBuffer<float4> vtx : register(t0);\n";
+  s += kVertexFetchHlsl;
   s += "struct VsOut { float4 pos : SV_Position;";
   for (int i = 0; i < 16; ++i) s += " float4 o" + std::to_string(i) + " : TEXCOORD" + std::to_string(i) + ";";
   s += " };\n";
@@ -343,9 +402,9 @@ std::string vp_to_hlsl(const u32* slots, u32 start, VpInfo* info) {
   s += "float4 vp_log(float x) { float ax = abs(x); float e = floor(log2(ax)); return float4(e, ax / exp2(e), log2(ax), 1); }\n";
   s += "VsOut main(uint vid : SV_VertexID) {\n";
   s += "  float4 v[16];\n";
-  for (int i = 0; i < 16; ++i)
-    s += (info->input_mask >> i) & 1 ? "  v[" + std::to_string(i) + "] = vtx[vid * 16 + " + std::to_string(i) + "];\n"
-                                     : "  v[" + std::to_string(i) + "] = float4(0, 0, 0, 1);\n";
+  s += "  [unroll] for (uint vi = 0; vi < 16; ++vi) v[vi] = float4(0, 0, 0, 1);\n";
+  s += "  [loop] for (uint vm = " + std::to_string(info->input_mask) +
+       "u; vm != 0; vm &= vm - 1) { uint vi = firstbitlow(vm); v[vi] = fetch(vi, vid); }\n";
   u32 nr = em.max_r() + 1;
   s += "  float4 r[" + std::to_string(nr) + "];\n  [unroll] for (int ri = 0; ri < " + std::to_string(nr) +
        "; ++ri) r[ri] = float4(0, 0, 0, 0);\n";

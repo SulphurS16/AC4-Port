@@ -213,6 +213,10 @@ class Emitter {
     std::string t = "tex" + std::to_string(unit), s = "smp" + std::to_string(unit);
     bool proj = op == TXP;
     std::string cc = coords(unit, c, proj);
+    if (env_.tex_dim[unit] == 5) {  // depth compare: the reference is the next coordinate (z, or z/w)
+      std::string ref = proj ? "((" + c + ").z / (" + c + ").w)" : "(" + c + ").z";
+      return "(" + t + ".SampleCmpLevelZero(" + s + ", " + cc + ", " + ref + ").xxxx)";
+    }
     switch (op) {
       case TXD: {
         u32 dim = env_.tex_dim[unit];
@@ -512,7 +516,8 @@ std::string fp_to_hlsl(const u8* ucode, u32 max_bytes, const FpEnv& env, FpInfo*
   for (u32 u = 0; u < 16; ++u) {
     if (!((info->tex_mask >> u) & 1) || env.tex_dim[u] == 0) continue;
     const char* type = env.tex_dim[u] == 3 ? "Texture3D" : env.tex_dim[u] == 4 ? "TextureCube" : "Texture2D";
-    s += std::string(type) + " tex" + std::to_string(u) + " : register(t" + std::to_string(u) + "); SamplerState smp" +
+    const char* sampler = env.tex_dim[u] == 5 ? "SamplerComparisonState" : "SamplerState";
+    s += std::string(type) + " tex" + std::to_string(u) + " : register(t" + std::to_string(u) + "); " + sampler + " smp" +
          std::to_string(u) + " : register(s" + std::to_string(u) + ");\n";
   }
   s += "struct PsIn { float4 pos : SV_Position;";

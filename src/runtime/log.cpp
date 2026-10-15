@@ -9,6 +9,7 @@
 #include <mutex>
 
 #include "common/file.h"
+#include "common/privacy.h"
 
 namespace rt {
 namespace {
@@ -40,7 +41,8 @@ Level log_level() { return g_level; }
 
 double log_time() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_t0).count(); }
 
-void log_write(Level l, const char* chan, const std::string& msg) {
+void log_write(Level l, const char* chan, const std::string& text) {
+  const std::string msg = ac4::redact_personal(text);  // logs are shared as they are
   double t = log_time();
   char head[96];
   std::snprintf(head, sizeof head, "[%9.4f %s %5lu %s] ", t, name(l), GetCurrentThreadId() % 100000, chan);

@@ -1,24 +1,29 @@
 // ac4: runtime host for the recompiled Armored Core 4 (BLUS30027) executable.
-//   ac4 [--disc <dir>] [--prepared <dir>] [--hdd0 <dir>] [--seconds N] [--trace-hle] [--log-level trace|debug|info]
+//   ac4 [--data <dir>] [--user <dir>] [--disc <dir>] [--flash <dir>] [--seconds N] [--fps N|display|uncapped] ...; options below
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <psapi.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 
 #include "common/file.h"
 #include "common/sfo.h"
 #include "runtime/bindings.h"
 #include "runtime/config.h"
-#include "runtime/datawatch.h"
 #include "runtime/gpu/d3d11_device.h"
+#include "runtime/gpu/display.h"
+#include "runtime/gpu/shader_warm.h"
 #include "runtime/gpu/window.h"
 #include "runtime/rsx/rsx.h"
+#include "runtime/settings.h"
 #include "runtime/sysutil.h"
 #include "runtime/hle.h"
 #include "runtime/input.h"
@@ -38,6 +43,7 @@ Config& cfg() {
   return c;
 }
 void vdec_dump();
+std::string audio_report();  // cellAudio.cpp: output statistics since the last call
 void lv2_init();  // lv2 subsystems that need setup after memory/loader
 namespace lv2 {
 void spu_dump();
@@ -52,107 +58,149 @@ extern std::atomic<int> g_capture_requests;
 using namespace rt;
 namespace fs = std::filesystem;
 
+namespace {
+
+// Run directories are named after their UTC start time (YYYYMMDD-HHMMSS); with --keep-runs N only
+// the newest N stay (the launcher's runs keep their logs without filling the disk).
+void prune_runs(const fs::path& runs, unsigned keep) {
+  std::error_code ec;
+  std::vector<fs::path> dirs;
+  for (const auto& e : fs::directory_iterator(runs, ec)) {
+    std::string n = e.path().filename().string();
+    if (e.is_directory(ec) && n.size() == 15 && n[8] == '-' &&
+        std::all_of(n.begin(), n.end(), [](char ch) { return ch == '-' || (ch >= '0' && ch <= '9'); }))
+      dirs.push_back(e.path());
+  }
+  if (dirs.size() <= keep) return;
+  std::sort(dirs.begin(), dirs.end());
+  for (size_t i = 0; i + keep < dirs.size(); ++i) {
+    ac4::guard_write(dirs[i]);
+    fs::remove_all(dirs[i], ec);
+  }
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   Config& c = cfg();
   fs::path root = fs::current_path();
-  c.disc_root = (root / "Armored Core 4 (USA)").string();  // the user's disc folder (read-only)
-  c.prepared = (root / "local" / "game" / "BLUS30027").string();
-  c.hdd0 = (root / "local" / "hdd0").string();
-  c.hdd1 = (root / "local" / "hdd1").string();
-  c.flash = (root / "local" / "game" / "firmware" / "dev_flash").string();
-  c.spu_cache = (root / "local" / "spu_cache").string();
-  c.shader_cache = (root / "local" / "shader_cache").string();
-  c.input_config = (root / "local" / "config" / "input.ini").string();
+  // Where everything machine-local lives: --data DIR (the launcher's data folder), by default
+  // local\ in the current directory (the development layout). --settings FILE replaces the
+  // shared settings file for a run (tests).
+  fs::path data = root / "local", user;
+  std::string settings_override;
+  for (int i = 1; i + 1 < argc; ++i) {
+    std::string a = argv[i];
+    if (a == "--data") data = fs::absolute(argv[i + 1]);
+    else if (a == "--user") user = fs::absolute(argv[i + 1]);
+    else if (a == "--settings") settings_override = argv[i + 1];
+    else if (a == "--keep-runs") c.keep_runs = unsigned(std::strtoul(argv[i + 1], nullptr, 10));
+  }
+  c.data_dir = data.string();
+  // The user's game folder: by default the disc folder inside the current directory; the first
+  // line of <data>\config\disc_root.txt names another one; --disc overrides both.
+  c.disc_root = (root / "Armored Core 4 (USA)").string();
+  if (std::ifstream f(data / "config" / "disc_root.txt"); f) {
+    std::string line;
+    std::getline(f, line);
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '"')) line.pop_back();
+    size_t b = line.find_first_not_of(" \"");
+    if (b != std::string::npos && !line.empty()) c.disc_root = line.substr(b);
+  }
+  c.prepared = (data / "game" / "BLUS30027").string();
+  c.hdd0 = (data / "hdd0").string();
+  c.hdd1 = (data / "hdd1").string();
+  c.flash = (data / "game" / "dev_flash").string();  // the dev_flash file(s) imported from the player's RPCS3
+  c.spu_cache = (data / "spu_cache").string();
+  c.shader_cache = (data / "shader_cache").string();
+  // The player's own folder (--user, from the launcher): settings.ini and savedata\ there. Without
+  // it both stay in the data folder (development runs, test profiles).
+  c.settings_file = !settings_override.empty() ? settings_override
+                    : !user.empty()            ? (user / "settings.ini").string()
+                                               : ac4::settings::file_in(data).string();
+  if (!user.empty()) c.saves = (user / "savedata").string();
+  std::string shader_manifest = (root / "data" / "shader_manifest.txt").string();
+  // Run directory: <data>\runs\<UTC timestamp>
+  std::time_t now = std::time(nullptr);
+  std::tm tm{};
+  gmtime_s(&tm, &now);
+  char stamp[32];
+  std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
+  fs::path run = data / "runs" / stamp;
+  try {
+    ac4::guard_write(run);
+    fs::create_directories(run);
+    if (c.keep_runs) prune_runs(data / "runs", c.keep_runs);
+    c.run_dir = run.string();
+    log_open((run / "ac4.log").string());
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "cannot create the run directory %s: %s\n", run.string().c_str(), e.what());
+    return 1;
+  }
+  // Shared settings (launcher and PC SETTINGS), before the command line overrides them.
+  std::vector<std::string> settings_notes;
+  settings::init(c.settings_file, &settings_notes);
+  bool safe_mode = std::any_of(argv + 1, argv + argc, [](const char* a) { return std::string(a) == "--safe-mode"; });
+  if (safe_mode) {
+    settings::use_safe_display();
+    settings_notes.push_back("safe mode: default display settings in a 1280x720 window for this run (the settings file is unchanged)");
+  }
+  {
+    ac4::settings::Display d = settings::display();
+    c.fps = d.fps;
+    c.pacing = d.pacing;
+    c.fullscreen = d.mode == ac4::settings::Mode::Borderless;
+    c.window_w = d.width;
+    c.window_h = d.height;
+  }
   std::string level = "info";
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };
-    if (a == "--disc") c.disc_root = next();
-    else if (a == "--prepared") c.prepared = next();
-    else if (a == "--hdd0") c.hdd0 = next();
-    else if (a == "--flash") c.flash = next();
-    else if (a == "--seconds") c.seconds = std::atof(next().c_str());
-    else if (a == "--trace-hle") c.trace_hle = true;
-    else if (a == "--trace-lle") c.trace_lle = true;
+    if (a == "--data" || a == "--user" || a == "--settings" || a == "--keep-runs") next();  // read above
+    else if (a == "--safe-mode") continue;  // read above
+    else if (a == "--disc") c.disc_root = next();
     else if (a == "--log-level") level = next();
-    else if (a == "--headless") c.headless = true;
-    else if (a == "--lenient") c.lenient = true;
-    else if (a == "--trace-spu" && i + 1 < argc) c.trace_spu = argv[++i];
-    else if (a == "--trace-spu-limit" && i + 1 < argc) c.trace_spu_limit = unsigned(std::stoul(argv[++i]));
-    else if (a == "--trace-spu-cats" && i + 1 < argc) c.trace_spu_cats = unsigned(std::stoul(argv[++i]));
-    else if (a == "--profile") c.profile = next();
-    else if (a == "--profile-stacks") c.profile_stacks = next();
-    else if (a == "--verify-native") c.verify_native = true;
-    else if (a == "--texture-bc") c.texture_bc = next() != "off";
-    else if (a == "--spu-collect") c.spu_collect = true;
-    else if (a == "--spu-interp") c.spu_interp = true;
-    else if (a == "--trace-rsx") c.trace_rsx = unsigned(std::stoul(next()));
-    else if (a == "--trace-rsx-at") c.trace_rsx_at = std::atof(next().c_str());
-    else if (a == "--dump-shaders") c.dump_shaders = true;
-    else if (a == "--shot-surface") c.shot_surface = std::stol(next(), nullptr, 0);
-    else if (a == "--watch-lines") c.watch_lines = next();
-    else if (a == "--watch-access") c.watch_access = next();
-    else if (a == "--dialog") c.dialog_script = next();
-    else if (a == "--profile-at") c.profile_at = std::atof(next().c_str());
-    else if (a == "--profile-split") c.profile_split = std::atof(next().c_str());
-    else if (a == "--frame-report") c.frame_report = std::atof(next().c_str());
-    else if (a == "--skip-fp") c.skip_fp = unsigned(std::stoul(next(), nullptr, 0));
-    else if (a == "--input") c.input_script = next();
-    else if (a == "--control") c.control_file = next();
-    else if (a == "--input-config") c.input_config = next();
-    else if (a == "--isolate-input") c.isolate_input = true;
-    else if (a == "--gpu-submit") c.gpu_submit_thread = next() != "off";
-    else if (a == "--priority") c.priority = next();
-    else if (a == "--gpu-timing") c.gpu_timing = 1;
-    else if (a == "--present-delay") c.present_delay_ms = std::atof(next().c_str());
-    else if (a == "--fps-limit") {
+    else if (a == "--warm-shaders") c.warm_shaders = true;
+    else if (a == "--shader-manifest") shader_manifest = next();
+    else if (a == "--pacing") c.pacing = next();
+    else if (a == "--fps") {
       std::string v = next();
-      if (!parse_fps_limit(v, &c.fps_limit)) {
-        std::fprintf(stderr, "--fps-limit %s: use frames per second, console, display or unlimited\n", v.c_str());
-        return 2;
-      }
+      c.fps = v == "display" ? 0 : v == "uncapped" ? ac4::settings::kFpsUncapped : std::max(30.0, std::atof(v.c_str()));
     }
-    else if (a == "--vsync") c.vsync = next() != "off";
+    else if (a == "--windowed") c.fullscreen = false, c.windowed = true;
     else if (a == "--fullscreen") c.fullscreen = true;
-    else if (a == "--test-overlay") c.test_overlay = next();
-    else if (a == "--gpu-timing-draws") c.gpu_timing = 2;
-    else if (a == "--spu-cache") c.spu_cache = next();
-    else if (a == "--shot-interval") c.shot_interval = std::atof(next().c_str());
+    else if (a == "--priority") c.priority = next();
+    else if (a == "--flash") c.flash = next();  // the launcher's folder for the chosen system software
     else {
       std::fprintf(stderr, "unknown argument %s\n", a.c_str());
       return 2;
     }
   }
   ac4::add_protected_root(c.disc_root);
-  // Run directory: local/runs/<UTC timestamp>
-  std::time_t now = std::time(nullptr);
-  std::tm tm{};
-  gmtime_s(&tm, &now);
-  char stamp[32];
-  std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
-  fs::path run = root / "local" / "runs" / stamp;
-  fs::create_directories(run);
-  c.run_dir = run.string();
-  log_open((run / "ac4.log").string());
   log_set_level(level == "trace" ? Level::Trace : level == "debug" ? Level::Debug : Level::Info);
-  hle::g_trace = c.trace_hle;
-  for (size_t p = 0; p < c.watch_lines.size();) {  // --watch-lines ea:size,...
-    size_t q = c.watch_lines.find(',', p);
-    std::string item = c.watch_lines.substr(p, q == std::string::npos ? std::string::npos : q - p);
-    size_t colon = item.find(':');
-    if (colon != std::string::npos)
-      res::watch_add(u32(std::stoul(item.substr(0, colon), nullptr, 0)), u32(std::stoul(item.substr(colon + 1), nullptr, 0)));
-    if (q == std::string::npos) break;
-    p = q + 1;
-  }
-  prof::start(c.profile, c.profile_stacks);
+  LOG_I("main", "Armored Core 4 PC port %s", AC4_VERSION);
   LOG_I("main", "run dir %s", c.run_dir.c_str());
-  if (!c.watch_access.empty() && !datawatch::configure(c.watch_access)) return 2;
-  set_fatal_hook([] {
-    prof::write_report(cfg().run_dir + "/profile.txt");
-    datawatch::write_report(cfg().run_dir + "/access.txt");
-  });
-  bindings::load(c.input_config);
+  if (c.affinity) {  // --affinity MASK (hex): fewer logical CPUs, to estimate smaller machines
+    if (SetProcessAffinityMask(GetCurrentProcess(), DWORD_PTR(c.affinity)))
+      LOG_I("main", "--affinity: limited to logical CPUs 0x%llx (%d of them)", c.affinity, __builtin_popcountll(c.affinity));
+    else
+      LOG_W("main", "--affinity 0x%llx not applied (error %lu)", c.affinity, GetLastError());
+  }
+  if (c.warm_shaders) {  // pipeline step: shader cache from the manifest, no game run
+    gpu::WarmResult w = gpu::warm_shaders(shader_manifest, c.disc_root, c.prepared);
+    if (!w.error.empty()) {
+      LOG_E("warm", "%s", w.error.c_str());
+      std::fprintf(stderr, "%s\n", w.error.c_str());
+      return 1;
+    }
+    std::string s = ac4::strprintf("shader warm-up: %u programs, %u compiled, %u already cached, %u skipped, %u failed; %.1f s on %u threads",
+                                    w.programs, w.compiled, w.cached, w.skipped, w.failed, w.seconds, w.threads);
+    LOG_I("warm", "%s", s.c_str());
+    std::printf("%s\n", s.c_str());
+    return w.failed ? 1 : 0;
+  }
+  for (const auto& n : settings_notes) LOG_I("main", "%s", n.c_str());
   // Optional process priority: with other programs keeping every core busy, each handoff between
   // the game's threads otherwise waits for a time slice (the frame rate collapses); above normal,
   // the game's threads run when they become ready. Off by default: it takes CPU time from other
@@ -166,7 +214,8 @@ int main(int argc, char** argv) {
   }
   if (c.isolate_input) LOG_I("input", "--isolate-input: the real keyboard, mouse and pads are ignored (scripted input only)");
   if (c.lenient) LOG_W("main", "SURVEY MODE (--lenient): unimplemented calls return 0; results are not evidence of working behaviour");
-  LOG_I("main", "disc %s, prepared %s, hdd0 %s", c.disc_root.c_str(), c.prepared.c_str(), c.hdd0.c_str());
+  LOG_I("main", "disc %s, prepared %s, hdd0 %s, saves %s, settings %s", c.disc_root.c_str(), c.prepared.c_str(), c.hdd0.c_str(),
+        c.saves.empty() ? "in hdd0" : c.saves.c_str(), c.settings_file.c_str());
   try {
     auto sfo = ac4::sfo::parse(ac4::read_file(fs::path(c.disc_root) / "PS3_GAME" / "PARAM.SFO"));
     c.title_id = ac4::sfo::get_string(sfo, "TITLE_ID");
@@ -201,10 +250,17 @@ int main(int argc, char** argv) {
     return 1;
   }
   lv2_init();
-  if (!c.headless && !gpu::window_create(c.title + " - native port", 1280, 720, true))
+  if (!c.headless) gpu::window_dpi_aware();
+  if (!c.headless && !gpu::window_create("ARMORED CORE 4", c.window_w, c.window_h, true)) {
     LOG_E("main", "window creation failed; running without presentation");
-  else if (!c.headless && c.fullscreen)
-    gpu::window_set_fullscreen(true);
+  } else if (!c.headless) {
+    ac4::settings::Display d = settings::display();
+    if (!d.monitor.empty()) gpu::window_move_to_monitor(d.monitor);  // the chosen monitor, before any fullscreen mode
+    if (c.fullscreen)
+      gpu::window_set_fullscreen(true);
+    else if (!c.windowed && d.mode == ac4::settings::Mode::Fullscreen)  // exclusive fullscreen from the first frame
+      gpu::request_exclusive(true, u32(d.fs_width), u32(d.fs_height), u32(d.fs_hz));
+  }
   start_main_thread(ex.entry_opd, ex.primary_stack, ex.primary_prio, ex.tls_vaddr, ex.tls_filesz, ex.tls_memsz,
                     ex.malloc_pagesize, "/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN");
   auto t0 = std::chrono::steady_clock::now();
@@ -220,15 +276,11 @@ int main(int argc, char** argv) {
       gpu::shader_stats(&compiled, &cached, &secs);
       LOG_I("main", "shaders: %u compiled (%.1f s), %u from the shader cache", compiled, secs, cached);
     }
-    prof::write_report(c.run_dir + "/profile.txt");
-    prof::cpu_report();
     thread_dump();
     lwmutex_dump();
     lv2::sync_dump();
     lv2::spu_dump();
     vdec_dump();
-    res::watch_dump(c.run_dir + "/watch.txt");
-    datawatch::write_report(c.run_dir + "/access.txt");
     LOG_I("dump", "PPU conditional stores refused by a change elsewhere in the 128-byte granule: %llu",
           (unsigned long long)ppu::granule_conflicts());
     rsx::dump();
@@ -246,7 +298,7 @@ int main(int argc, char** argv) {
       double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       if (now - last_fps_at >= 5) {  // displayed frame rate, for performance tracking
         u64 f = rsx::flips();
-        std::string busy = prof::cpu_interval(4);
+        std::string busy = "-";
         PROCESS_MEMORY_COUNTERS pmc{};
         GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc);
         static u64 last_faults = 0;
@@ -265,6 +317,8 @@ int main(int argc, char** argv) {
                 double(f - last_flips) / (now - last_fps_at), sys_busy, our_share,
                 double(pmc.PageFaultCount - last_faults) / (now - last_fps_at), (unsigned long long)(pmc.WorkingSetSize >> 20),
                 busy.c_str());
+        if (last_fps_at > 0) LOG_I("perf", "%s", audio_report().c_str());
+        if (last_fps_at > 0 && !c.headless) LOG_I("perf", "%s", gpu::display::report().c_str());
         last_faults = pmc.PageFaultCount;
         last_idle = idle;
         last_total = total;
@@ -288,14 +342,7 @@ int main(int argc, char** argv) {
       close_at = el;
     }
     if (close_at >= 0 && el - close_at > 5.0) stop("game did not exit within 5 s of the exit request");
-    if (next_shot > 0 && el >= next_shot) {
-      ++gpu::g_capture_requests;
-      next_shot += c.shot_interval;
-    }
-    if (el >= next_title) {
-      next_title = el + 1;
-      if (!c.headless) gpu::window_set_title(c.title + " - native port | " + rsx::stats());
-    }
-    if (c.seconds > 0 && el >= c.seconds) stop("--seconds limit reached");
+    (void)next_shot;
+    (void)next_title;
   }
 }

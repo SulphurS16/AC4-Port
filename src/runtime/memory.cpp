@@ -106,7 +106,9 @@ bool take_written_pages(u32 begin, u32 size, std::vector<u32>& out) {
   if (!g_write_watch) return false;
   static std::vector<void*> buf;
   if (buf.size() < size / 0x1000 + 1) buf.resize(size / 0x1000 + 1);  // every page fits: one call
-  ULONG_PTR count = buf.size();
+  // Room for this range only: the call's cost grows with the output array passed, so the capacity
+  // left by one large query made every later small query slow (milliseconds after a 3 GiB query).
+  ULONG_PTR count = size / 0x1000 + 1;
   DWORD gran = 0;
   if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, base() + begin, size, buf.data(), &count, &gran) != 0) return false;
   for (ULONG_PTR i = 0; i < count; ++i) out.push_back(u32(static_cast<u8*>(buf[i]) - base()));

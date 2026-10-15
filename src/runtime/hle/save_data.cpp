@@ -708,6 +708,40 @@ void automatic(ppu::Ctx& ctx, Op op, bool has_userdata = true) {
 }
 }  // namespace
 
+// The system's delete list (the SYSTEM menu's DELETE GAME): the title's saves; each deletion is
+// confirmed; backing out returns (CELL_OK when something was deleted, else CANCEL).
+s32 cellSaveDataDelete2(u32 /*container*/) {
+  fs::path root = savedata_root();
+  if (root.empty()) return SAVEDATA_ERROR_ACCESS_ERROR;
+  bool deleted = false;
+  for (;;) {
+    std::vector<Entry> entries = enumerate(root, "BLUS30187");
+    sort_entries(entries, 0, 0);  // newest first
+    if (entries.empty()) {
+      if (!deleted) sysdlg::message("There is no saved data.");
+      break;
+    }
+    std::vector<sysdlg::ListItem> items;
+    for (const Entry& e : entries) items.push_back({e.title, e.subtitle, e.detail, e.mtime, false});
+    int pick = sysdlg::choose("Delete", items, 0);
+    if (pick < 0) break;
+    const Entry& e = entries[size_t(pick)];
+    if (!sysdlg::confirm("Delete this saved data?\n\n" + e.title + "\n" + e.subtitle)) continue;
+    std::error_code ec;
+    fs::path dir = root / e.dir;
+    ac4::guard_write(dir);
+    fs::remove_all(dir, ec);
+    if (ec) {
+      LOG_W("savedata", "delete %s failed: %s", e.dir.c_str(), ec.message().c_str());
+      sysdlg::message("The saved data could not be deleted.");
+      continue;
+    }
+    LOG_I("savedata", "deleted %s", e.dir.c_str());
+    deleted = true;
+  }
+  return deleted ? CELL_OK : RET_CANCEL;
+}
+
 void cellSaveDataListSave2(ppu::Ctx& ctx) { list_or_fixed(ctx, Op::ListSave); }
 void cellSaveDataListLoad2(ppu::Ctx& ctx) { list_or_fixed(ctx, Op::ListLoad); }
 void cellSaveDataFixedSave2(ppu::Ctx& ctx) { list_or_fixed(ctx, Op::FixedSave); }

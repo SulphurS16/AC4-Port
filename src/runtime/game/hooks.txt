@@ -8,7 +8,6 @@
 0x00b67970 view_pitch_set         # AC view slot 9: look pitch thunk to slot 8 (0xb6b2a4); player calls return to 0xb52800 / 0xb52c30
 0x00a372e8 look_update            # an AC's look control: turn (0xa36c6c), pitch command, pitch integrator (0xa36684, state +48)
 0x001406b8 present                # frame pacer: flip buffer +16; mode 1 (+4) repeats the flip above the target rate (+32)
-0x00d30e6c movie_get_frame        # movie frame fetch (cellSailGraphicsAdapterGetFrame wrapper); 0xd30e04 feeds the last flip time to UpdateAvSync
 0x00d88e78 setjmp           # guest setjmp: its call sites may return twice (recompiler; runtime/guest_setjmp.cpp)
 0x00d88f9c longjmp          # guest longjmp: back to the live setjmp call (Lua script errors; runtime/guest_setjmp.cpp)
 0x002b12dc lua_throw        # Lua 5.0 luaD_throw(L, status): logs script errors (game/lua_hooks.cpp)
