@@ -8,7 +8,8 @@ namespace rt::game {
 // A guest thread started / exited (ppu_thread.cpp).
 void thread_started(const std::string& name);
 void thread_exited(const std::string& name);
-// A mission runs (its fire control thread exists).
+// Gameplay runs: the AC's fire control thread inside a sortie scene (missions, tutorial, AC TEST,
+// arena; frame_policy.cpp).
 bool mission_running();
 
 }  // namespace rt::game

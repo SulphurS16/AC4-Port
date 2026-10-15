@@ -18,3 +18,7 @@
 0x008fdbac heap_free        # game heap free: never frees those port-owned draw-arena objects (game/frame_hooks.cpp)
 0x008ebfd8 layer_add        # draw-list layer append (r3 manager): counts entries dropped by full layers (game/frame_hooks.cpp)
 0x008eb628 layer_add_direct # draw-list layer append (r3 layer header): same diagnostics
+0x0091af7c menu_frame       # every frame: pads to key messages {384, code} via the framework vtable +20 (menu_mouse.cpp)
+0x005de750 menu_dispatch    # dialog manager: a key message to its top dialog when it takes input (stops the menu mouse probe; menu_mouse.cpp)
+0x005de614 menu_dispatch_v  # the same with the message by value (SYSTEM and others: scene +1228 managers; menu_mouse.cpp)
+0x00640e98 menu_object      # a scene menu object: a key straight to one of its two dialogs (+272/+276 by +284; menu_mouse.cpp)
