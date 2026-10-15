@@ -14,8 +14,8 @@ namespace {
 
 const char* const kHead =
     "# ARMORED CORE 4 (native port): settings, shared by the launcher and the game's\n"
-    "# PC SETTINGS screen (F1 or a controller's Guide button while playing). Command-line options\n"
-    "# override them for one run.\n";
+    "# PC SETTINGS screen (SYSTEM > PC SETTINGS in the game). Command-line options override them\n"
+    "# for one run.\n";
 
 const char* const kDisplay =
     "[display]\n"
