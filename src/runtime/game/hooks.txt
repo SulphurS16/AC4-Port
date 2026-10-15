@@ -5,6 +5,7 @@
 0x00951f94 pad_update             # pad object update: cellPadGetData, sticks normalized at +1172 (port at +384)
 0x005ead28 pad_update_b           # second pad class: port at +736, sticks normalized at +1524
 0x00b6b148 view_turn_set          # AC view slot 6: turn command setter (r3 view, f1); player call returns to 0xb52708
+0x00b6acf4 view_turn_set_b        # the tutorial's AC view (vtable 0x10148768) slot 6: the same setter, also marking turn input for its steps
 0x00b67970 view_pitch_set         # AC view slot 9: look pitch thunk to slot 8 (0xb6b2a4); player calls return to 0xb52800 / 0xb52c30
 0x00a372e8 look_update            # an AC's look control: turn (0xa36c6c), pitch command, pitch integrator (0xa36684, state +48)
 0x001406b8 present                # frame pacer: flip buffer +16; mode 1 (+4) repeats the flip above the target rate (+32)

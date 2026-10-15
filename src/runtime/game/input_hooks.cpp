@@ -158,6 +158,10 @@ void hook_view_turn_set(Ctx& ctx, void (*orig)(Ctx&)) {
   orig(ctx);
 }
 
+// The tutorial's view class (vtable 0x10148768) has its own slot 6 (0xb6acf4): the same store, plus
+// a flag its steps count ("turn 3 times"); the player's operator calls it from the same place.
+void hook_view_turn_set_b(Ctx& ctx, void (*orig)(Ctx&)) { hook_view_turn_set(ctx, orig); }
+
 // View slot 9 (0xb67970, a thunk to slot 8: r3 view, f1 pitch command). From the player's operator
 // the mouse pitch of this frame is added after the game's own inversion option.
 void hook_view_pitch_set(Ctx& ctx, void (*orig)(Ctx&)) {
