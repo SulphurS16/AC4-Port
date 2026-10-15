@@ -140,9 +140,9 @@ fs::path local_appdata() {
   return r / L"AC4 Port";
 }
 
-// The player's own folder: settings.ini, savedata\ and backups\ (Saved Games\ARMORED CORE for
-// Answer; under Local AppData when Windows has no Saved Games folder; launcher.ini [paths] user
-// names another folder).
+// The player's own folder: settings.ini, savedata\ and backups\ (Saved Games\ARMORED CORE 4;
+// under Local AppData when Windows has no Saved Games folder; launcher.ini [paths] user names
+// another folder).
 fs::path user_dir() {
   if (!g_user_override.empty()) return g_user_override;
   PWSTR p = nullptr;
