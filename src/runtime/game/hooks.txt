@@ -22,3 +22,4 @@
 0x005de750 menu_dispatch    # dialog manager: a key message to its top dialog when it takes input (stops the menu mouse probe; menu_mouse.cpp)
 0x005de614 menu_dispatch_v  # the same with the message by value (SYSTEM and others: scene +1228 managers; menu_mouse.cpp)
 0x00640e98 menu_object      # a scene menu object: a key straight to one of its two dialogs (+272/+276 by +284; menu_mouse.cpp)
+0x006a19a0 menu_dialog_key  # a dialog's base key handler (to its focus object +36): any other route ends here (stops the probe; menu_mouse.cpp)

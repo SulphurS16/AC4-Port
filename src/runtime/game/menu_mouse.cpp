@@ -211,6 +211,18 @@ void menu_object_hook(Ctx& ctx, void (*orig)(Ctx&)) {
   ctx.r[3] = 1;  // the routing stops here either way (as the game's would: this object takes keys)
 }
 
+// The base dialog key handler (0x6a19a0: the key to the focus object's +36): the end of every
+// other route (scenes that hold their dialogs themselves, e.g. ACSIS at scene +296 / +304).
+void dialog_key_hook(Ctx& ctx, void (*orig)(Ctx&)) {
+  u32 msg = u32(ctx.r[4]), dialog = u32(ctx.r[3]);
+  if (!is_probe(msg)) {
+    orig(ctx);
+    return;
+  }
+  if (!g_probe_dialog && valid(dialog + kDlgFocus) && valid(ppu::r32(dialog + kDlgFocus))) g_probe_dialog = dialog;
+  ctx.r[3] = 1;
+}
+
 // Client pixels -> the game's 1280x720 picture (the frame is fitted to the window, centred).
 bool to_game(int cx, int cy, float* gx, float* gy) {
   int w = 0, h = 0;
@@ -523,5 +535,7 @@ void hook_menu_dispatch(Ctx& ctx, void (*orig)(Ctx&)) { rt::game::dispatch_hook(
 void hook_menu_dispatch_v(Ctx& ctx, void (*orig)(Ctx&)) { rt::game::dispatch_hook(ctx, orig); }
 // 0x640e98 (r3 a scene's menu object, r4 the message): the hub's menus (two dialogs, no manager).
 void hook_menu_object(Ctx& ctx, void (*orig)(Ctx&)) { rt::game::menu_object_hook(ctx, orig); }
+// 0x6a19a0 (r3 a dialog, r4 the message): a dialog's base key handler.
+void hook_menu_dialog_key(Ctx& ctx, void (*orig)(Ctx&)) { rt::game::dialog_key_hook(ctx, orig); }
 
 }  // namespace ppu
