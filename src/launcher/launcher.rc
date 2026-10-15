@@ -14,8 +14,8 @@ BEGIN
   BEGIN
     BLOCK "040904b0"
     BEGIN
-      VALUE "FileDescription", "ARMORED CORE for Answer PC port launcher"
-      VALUE "ProductName", "ARMORED CORE for Answer PC port (unofficial)"
+      VALUE "FileDescription", "ARMORED CORE 4 PC port launcher"
+      VALUE "ProductName", "ARMORED CORE 4 PC port (unofficial)"
       VALUE "FileVersion", "1.0.0"
       VALUE "ProductVersion", "1.0.0"
       VALUE "OriginalFilename", "AC4-Launcher.exe"

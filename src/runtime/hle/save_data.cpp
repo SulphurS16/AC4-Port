@@ -715,7 +715,7 @@ s32 cellSaveDataDelete2(u32 /*container*/) {
   if (root.empty()) return SAVEDATA_ERROR_ACCESS_ERROR;
   bool deleted = false;
   for (;;) {
-    std::vector<Entry> entries = enumerate(root, "BLUS30187");
+    std::vector<Entry> entries = enumerate(root, cfg().title_id);
     sort_entries(entries, 0, 0);  // newest first
     if (entries.empty()) {
       if (!deleted) sysdlg::message("There is no saved data.");

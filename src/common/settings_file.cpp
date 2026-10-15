@@ -13,7 +13,7 @@ namespace ac4::settings {
 namespace {
 
 const char* const kHead =
-    "# ARMORED CORE for Answer (native port): settings, shared by the launcher and the game's\n"
+    "# ARMORED CORE 4 (native port): settings, shared by the launcher and the game's\n"
     "# PC SETTINGS screen (F1 or a controller's Guide button while playing). Command-line options\n"
     "# override them for one run.\n";
 
@@ -56,31 +56,34 @@ const char* const kKeyboardHead =
     "#   Alt, Up, Down, Left, Right, Home, End, PageUp, PageDown, Insert, Delete, CapsLock, Mouse1\n"
     "#   (left), Mouse2 (right), Mouse3 (middle), Mouse4, Mouse5, WheelUp, WheelDown\n"
     "# Mouse buttons and the wheel count while the game window has the mouse (click into it). The\n"
-    "# defaults follow the game's SIMPLE control layout; the mouse turns and looks.\n";
+    "# defaults follow the game's control TYPE A; the mouse turns and looks.\n";
 
 const char* const kKeyboardDefaults =
-    "# Movement (left stick) and view (right stick)\n"
+    "# The game's control TYPE A (SYSTEM > CONTROL OPTIONS > KEY CONFIGURATION).\n"
+    "# MOVE (left stick)\n"
     "lstick_up = W\n"
     "lstick_down = S\n"
     "lstick_left = A\n"
     "lstick_right = D\n"
+    "# SIGHT (right stick: turn, look up and down; R3 resets the view); the mouse turns and looks\n"
     "rstick_up = Num8\n"
     "rstick_down = Num5, Num2\n"
     "rstick_left = Num4\n"
     "rstick_right = Num6\n"
-    "# Weapons: right arm, left arm, shoulder; switch right / left arm weapon\n"
-    "cross = Mouse1, Enter\n"
-    "square = Mouse2\n"
-    "r1 = F, Mouse3\n"
-    "circle = R, Backspace\n"
-    "triangle = Q\n"
-    "# Boosts: boost (hold to rise), quick boost, overed boost\n"
+    "r3 = C\n"
+    "# BOOST: boost (hold to rise), quick boost, overed boost\n"
     "l2 = Space\n"
     "r2 = Shift\n"
-    "l1 = E\n"
-    "# View reset, pause, menus\n"
-    "r3 = C\n"
-    "l3 = Z\n"
+    "triangle = E\n"
+    "# WEAPON: right arm, left arm, shoulder; switch right / left arm weapon (hold: reload)\n"
+    "cross = Mouse1, Enter\n"
+    "square = Mouse2\n"
+    "circle = F, Mouse3, Backspace\n"
+    "r1 = R, WheelUp\n"
+    "l1 = Q, WheelDown\n"
+    "# LOCK: lock on target (hold to switch the lock mode)\n"
+    "l3 = Ctrl, Mouse4\n"
+    "# Pause, Select, D-pad\n"
     "start = Escape\n"
     "select = Tab\n"
     "up = Up\n"

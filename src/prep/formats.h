@@ -30,7 +30,6 @@ struct ImportInputs {
   fs::path eboot_elf;    // EBOOT.elf (decrypted PS3_GAME/USRDIR/EBOOT.BIN)
   fs::path modules_dir;  // <module>.prx (the decrypted modules of sys/external)
   fs::path flash_atrac;  // flashATRAC.pic (from the same sys/external folder)
-  fs::path game_data;    // optional: the update's folder (USRDIR/regulation.bin) or a folder with regulation.bin
 };
 // Writes eboot.elf, lle/*.elf, the update data and manifest.txt to `out` and the dev_flash file
 // below `flash_out`; returns the manifest. Throws with a precise reason on a missing or wrong file.

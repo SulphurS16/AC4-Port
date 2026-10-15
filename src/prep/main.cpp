@@ -1,6 +1,6 @@
 // ac4-prep: local preparation of the user's own PS3 game inputs.
 //   ac4-prep import --disc <disc> --eboot <EBOOT.elf> --modules-dir <dir> --flash-file <flashATRAC.pic>
-//                    [--game-data <dir>] --out <prepared-dir> [--flash-out <dev_flash-dir>]
+//                    --out <prepared-dir> [--flash-out <dev_flash-dir>]
 //                                         (the player's decrypted files, verified by SHA-256)
 //   ac4-prep cpu                         (exit code 3 if the CPU lacks x86-64-v3 features)
 //   ac4-prep spu-records --manifest <spu_manifest.txt> --out <spu_cache-dir> <prepared-dir>
@@ -55,7 +55,6 @@ int main(int argc, char** argv) {
       else if (a == "--eboot") imp.eboot_elf = arg_value(i, argc, argv);
       else if (a == "--modules-dir") imp.modules_dir = arg_value(i, argc, argv);
       else if (a == "--flash-file") imp.flash_atrac = arg_value(i, argc, argv);
-      else if (a == "--game-data") imp.game_data = arg_value(i, argc, argv);
       else if (a == "--flash-out") flash_out = arg_value(i, argc, argv);
       else if (a == "--modules") {
         modules.clear();

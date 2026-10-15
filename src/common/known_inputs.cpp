@@ -2,8 +2,8 @@
 
 namespace ac4::inputs {
 
-const Known kEbootBin = {"EBOOT.BIN", "96fb034cb52748c76d243d665b1aa4979ba384b7c5deba38b02438ff7de52ce1", 20282920};
-const Known kEbootElf = {"EBOOT.elf", "084c9c3fbe6b68e0e3427a056385f50474cdc7d28cabb167bb2c5d1e91c7aa15", 20280488};
+const Known kEbootBin = {"EBOOT.BIN", "166f4a6b024f0abe6349b7cf481c95f445f6af31f3e2846fa0523d2fd8db2325", 17244256};
+const Known kEbootElf = {"EBOOT.elf", "0fd1e2ee4dbc599874fabccd596f922904955d8f5c1dbd92a34101ac930daaa1", 17241824};
 
 const char* const kModules[kModuleCount] = {"libsre",  "libsail", "libpamf",       "libdmux",   "libdmuxpamf",
                                             "libadec", "libvpost", "libatrac3plus", "libatxdec", "libat3dec"};
@@ -11,7 +11,7 @@ const char* const kModules[kModuleCount] = {"libsre",  "libsail", "libpamf",    
 namespace {
 
 // RPCS3's decryptions of the 4.93 modules (verified 2026-10-15 with RPCS3 0.0.42-19698: identical to
-// this project's own decryption; relocated they give the modules data/spu_manifest.txt lists).
+// the ACFA port's own decryption; the same files for every game).
 const Known kModules493[kModuleCount] = {
     {"libsre.prx", "9e7ee6edc99b1d372686cf927b883b18f19ed4d32d1faf35e214cca4ae0737b6", 239344},
     {"libsail.prx", "ac33b80980d45113d887c868ff02619dc145e8a80bc102749a31fbd750431bbb", 203400},
@@ -52,6 +52,5 @@ std::string module_other_version(const std::string& name, const std::string& sha
 }
 
 const Known kFlashAtrac = {"flashATRAC.pic", "1edf54e1323dd736b71958ca56307d536dedc7c05ccb0dd3b2a3be1af5b50e30", 35131};
-const Known kRegulation = {"regulation.bin", "c7e993ad592c681963426b7ac7f2c5f4de28aa8b8a1a466f2b1518954232f70f", 245656};
 
 }  // namespace ac4::inputs

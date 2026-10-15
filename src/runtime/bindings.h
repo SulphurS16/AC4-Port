@@ -1,7 +1,7 @@
 // Keyboard and mouse bindings onto the emulated pad (port 0), kept in the [keyboard], [menu] and
 // [mouse] sections of the shared settings file (common/settings_file.h; defaults: the game's
-// SIMPLE key scheme: WASD move, mouse look, left/right click right/left arm weapon, Space boost,
-// Shift quick boost, E overed boost, Escape pause). In the game's menus the [menu] keys come first
+// control TYPE A: WASD move, mouse look, left/right click right/left weapon, F shoulder weapon,
+// Space boost, Shift quick boost, E over boost, Ctrl lock on, Escape pause). In the game's menus the [menu] keys come first
 // (Enter choose, Escape back; game/menu_mouse.h decides where the input goes). The PC SETTINGS
 // screen changes them while the game runs.
 #pragma once

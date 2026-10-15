@@ -125,24 +125,6 @@ std::string rpcs3_system_software(const fs::path& rpcs3_exe) {
   return "";
 }
 
-fs::path find_update_pkg(const fs::path& disc, const fs::path& also) {
-  for (const fs::path& root : {disc, also}) {
-    if (root.empty()) continue;
-    std::error_code ec;
-    for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end; it.increment(ec)) {
-      if (it.depth() > 2) {
-        it.disable_recursion_pending();
-        continue;
-      }
-      std::wstring n = lower(it->path().filename().wstring());
-      std::error_code e2;
-      if (it->is_regular_file(e2) && n.size() > 4 && n.compare(n.size() - 4, 4, L".pkg") == 0 && n.find(L"blus30187") != std::wstring::npos)
-        return it->path();
-    }
-  }
-  return {};
-}
-
 Rpcs3Prep::~Rpcs3Prep() {
   cancel();
   if (worker_.joinable()) worker_.join();
@@ -202,7 +184,7 @@ void Rpcs3Prep::run(Rpcs3Job job) {
   log_ = _wfopen((job.work.parent_path() / "prepare-files.log").c_str(), L"wb");
   t0_ = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
   log("Prepare files: RPCS3 " + narrow(job.rpcs3_exe.wstring()) + ", update file " + narrow(job.pup.wstring()) + ", game " +
-      narrow(job.disc.wstring()) + ", update package " + (job.update_pkg.empty() ? std::string("none") : narrow(job.update_pkg.wstring())));
+      narrow(job.disc.wstring()));
   std::string titles_seen;  // the RPCS3 windows last logged
   auto log_windows = [&] {
     std::string t;
@@ -377,55 +359,16 @@ void Rpcs3Prep::run(Rpcs3Job job) {
   for (const std::string& m : module_names())
     if (!is_file(stage / (m + ".prx"))) return finish(false, "RPCS3 did not decrypt " + m + ".sprx.");
 
-  // 4. The game's update (optional): RPCS3 asks once whether to install it (Install is its default).
-  fs::path game_data;
-  std::string note;
-  if (!job.update_pkg.empty() && options.count("--installpkg")) {
-    set_status("Installing the game's update in the private copy of RPCS3...");
-    fs::path pkg = job.work / job.update_pkg.filename();
-    fs::copy_file(job.update_pkg, pkg, fs::copy_options::overwrite_existing, ec);
-    fs::path reg = copy / "dev_hdd0" / "game" / ki::kTitleId / "USRDIR" / ki::kRegulation.name;
-    std::vector<std::wstring> a = base;
-    a.insert(a.end(), {L"--installpkg", pkg.wstring()});
-    if (!ec && start_rpcs3(exe, a)) {
-      auto pressed = Clock::now() - std::chrono::seconds(10);
-      int presses = 0;
-      for (auto t0 = Clock::now(); !is_file(reg) && !exited();) {
-        if (cancel_) return finish(false, cancelled);
-        Sleep(200);
-        log_windows();
-        // The question takes Enter (a few tries while it is not ready yet; the install itself is
-        // a moment, so no later window gets one).
-        if (HWND h = window_titled(pid, L"PKG Installation"); h && presses < 3 && Clock::now() - pressed > std::chrono::seconds(5)) {
-          UINT scan = MapVirtualKeyW(VK_RETURN, MAPVK_VK_TO_VSC);
-          PostMessageW(h, WM_KEYDOWN, VK_RETURN, LPARAM(1 | (scan << 16)));
-          PostMessageW(h, WM_KEYUP, VK_RETURN, LPARAM(1 | (scan << 16) | (1u << 30) | (1u << 31)));
-          pressed = Clock::now();
-          ++presses;
-        }
-        if (Clock::now() - t0 > std::chrono::minutes(2)) break;
-      }
-      Sleep(1500);  // the package's other files
-      stop();
-    }
-    if (is_file(reg)) game_data = reg.parent_path().parent_path();
-    else note = "The game's update could not be installed; the disc's balance data is used.";
-  } else if (job.update_pkg.empty()) {
-    note = "No update package of the game was found: the disc's balance data is used (optional).";
-  }
-
-  // 5. The launcher's folder of decrypted files.
+  // 4. The launcher's folder of decrypted files.
   set_status("Collecting the files...");
   fs::create_directories(job.out, ec);
-  fs::remove_all(job.out / ki::kTitleId, ec);
   std::vector<std::string> files = {"EBOOT.elf", ki::kFlashAtrac.name};
   for (const std::string& m : module_names()) files.push_back(m + ".prx");
   for (const std::string& f : files) {
     fs::copy_file(stage / f, job.out / f, fs::copy_options::overwrite_existing, ec);
     if (ec) return finish(false, "The files could not be saved in " + narrow(job.out.wstring()) + ": " + ec.message());
   }
-  if (!game_data.empty()) fs::copy(game_data, job.out / ki::kTitleId, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-  finish(true, "", note);
+  finish(true, "", "");
 }
 
 }  // namespace launcher

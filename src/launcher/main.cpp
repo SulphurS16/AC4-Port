@@ -5,7 +5,7 @@
 // changed in game under SYSTEM > PC SETTINGS) and starts the game. The More menu holds the rest:
 // render scale, monitor, presets, saves (open, back up, restore), safe mode, settings reset, the
 // install folder, rebuild and the log. Settings and saves are the player's own: they live in
-// Saved Games\ARMORED CORE for Answer, the install folder holds the rest.
+// Saved Games\ARMORED CORE 4, the install folder holds the rest.
 // Contains no game data or game-derived code.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -41,7 +41,8 @@ using namespace launcher;
 namespace {
 
 constexpr UINT WM_SETUP = WM_APP + 1, WM_CHECKED = WM_APP + 2, WM_GAME_EXIT = WM_APP + 3, WM_PREP = WM_APP + 4;
-constexpr const wchar_t* kTitle = L"ARMORED CORE for Answer";
+constexpr const wchar_t* kTitle = L"ARMORED CORE 4";
+constexpr const wchar_t* kSavePrefix = L"BLUS30027";  // the game's save folders
 enum Id {
   kDiscEdit = 100, kFilesEdit,
   kDiscBrowse = 110, kFilesBrowse, kPrepFiles,
@@ -77,7 +78,7 @@ bool g_ready = false;
 std::wstring g_note;  // a message for the status line (a setup or game error) until the next action
 
 std::mutex g_check_mu;
-Status g_disc_check, g_files_check, g_update_check;
+Status g_disc_check, g_files_check;
 bool g_checked = false;
 std::atomic<int> g_check_gen{0};
 
@@ -108,7 +109,7 @@ void load_paths() {
 void save_paths() {
   try {
     ac4::Ini ini = ac4::Ini::load(g_ini_path);
-    if (ini.empty()) ini = ac4::Ini::parse("# ARMORED CORE for Answer launcher: the locations chosen in the launcher\n");
+    if (ini.empty()) ini = ac4::Ini::parse("# ARMORED CORE 4 launcher: the locations chosen in the launcher\n");
     ini.set("paths", "disc", narrow(g_cfg.disc.wstring()));
     ini.set("paths", "files", narrow(g_cfg.files.wstring()));
     ini.set("paths", "install", narrow(g_cfg.data.wstring()));
@@ -146,7 +147,7 @@ fs::path user_dir() {
   if (!g_user_override.empty()) return g_user_override;
   PWSTR p = nullptr;
   fs::path r;
-  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_SavedGames, KF_FLAG_CREATE, nullptr, &p))) r = fs::path(p) / L"ARMORED CORE for Answer";
+  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_SavedGames, KF_FLAG_CREATE, nullptr, &p))) r = fs::path(p) / L"ARMORED CORE 4";
   CoTaskMemFree(p);
   return r.empty() ? local_appdata() / L"user" : r;
 }
@@ -354,13 +355,13 @@ std::wstring stamp_now() {
   return b;
 }
 
-// Copies the game's save folders (BLUS30187...) from one savedata folder to another.
+// Copies the game's save folders (BLUS30027...) from one savedata folder to another.
 size_t copy_saves(const fs::path& from, const fs::path& to) {
   size_t n = 0;
   std::error_code ec;
   fs::create_directories(to, ec);
   for (const auto& e : fs::directory_iterator(from, ec)) {
-    if (!e.is_directory() || e.path().filename().wstring().rfind(L"BLUS30187", 0) != 0) continue;
+    if (!e.is_directory() || e.path().filename().wstring().rfind(kSavePrefix, 0) != 0) continue;
     fs::copy(e.path(), to / e.path().filename(), fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
     if (!ec) ++n;
   }
@@ -378,7 +379,7 @@ void move_to_user_dir() {
   fs::path old_saves = g_cfg.data / "hdd0" / "home" / "00000001" / "savedata";
   bool have = false;
   for (const auto& e : fs::directory_iterator(saves_dir(), ec))
-    have |= e.is_directory() && e.path().filename().wstring().rfind(L"BLUS30187", 0) == 0;
+    have |= e.is_directory() && e.path().filename().wstring().rfind(kSavePrefix, 0) == 0;
   if (!have && fs::exists(old_saves, ec)) copy_saves(old_saves, saves_dir());
   fs::path old_backups = g_cfg.data / "backups";
   if (!fs::exists(backups_dir(), ec) && fs::exists(old_backups, ec)) fs::copy(old_backups, backups_dir(), fs::copy_options::recursive, ec);
@@ -390,13 +391,12 @@ void start_checks() {
   SetupConfig c = g_cfg;
   std::thread([c, gen] {
     Found f = find_files(c.disc, c.files);
-    Status d = check_disc(c.disc, f), m = check_modules(c.files, f), u = check_update(f);
+    Status d = check_disc(c.disc, f), m = check_modules(c.files, f);
     {
       std::lock_guard lk(g_check_mu);
       if (gen != g_check_gen) return;
       g_disc_check = d;
       g_files_check = m;
-      g_update_check = u;
       g_checked = true;
     }
     PostMessageW(g_wnd, WM_CHECKED, WPARAM(gen), 0);
@@ -562,7 +562,6 @@ void prepare_files() {
   job.rpcs3_exe = exe;
   job.pup = pup;
   job.disc = g_cfg.disc;
-  job.update_pkg = find_update_pkg(g_cfg.disc, pup.empty() ? fs::path() : pup.parent_path());
   job.work = g_cfg.data / "rpcs3-work";
   job.out = g_cfg.data / "decrypted";
   g_note.clear();
@@ -775,18 +774,14 @@ void on_setup_update() {
 
 // The check results: one line per folder (update_buttons adds how to get missing files).
 void show_checks() {
-  Status d, m, u;
+  Status d, m;
   {
     std::lock_guard lk(g_check_mu);
     d = g_disc_check;
     m = g_files_check;
-    u = g_update_check;
   }
   set_text(kDiscState, widen(d.text));
-  std::string files = m.text;
-  if (m.verdict == Verdict::Ok && u.verdict == Verdict::Ok) files += ", " + u.text;
-  if (m.verdict == Verdict::Ok && !u.text.empty() && u.verdict != Verdict::Ok) files += "; " + u.text;
-  set_text(kFilesState, widen(files));
+  set_text(kFilesState, widen(m.text));
   for (int id : {kDiscState, kFilesState}) InvalidateRect(item(id), nullptr, TRUE);
 }
 
@@ -927,7 +922,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
           std::error_code ec;
           bool any = false;
           for (const auto& e : fs::directory_iterator(from, ec))
-            any |= e.is_directory() && e.path().filename().wstring().rfind(L"BLUS30187", 0) == 0;
+            any |= e.is_directory() && e.path().filename().wstring().rfind(kSavePrefix, 0) == 0;
           if (!any) {
             MessageBoxW(g_wnd, L"No saves of this game in that folder.", kTitle, MB_ICONWARNING);
             break;
@@ -937,7 +932,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
           copy_saves(saves_dir(), backups_dir() / (L"saves-before-restore-" + stamp_now()));
           for (const auto& e : fs::directory_iterator(saves_dir(), ec))
-            if (e.is_directory() && e.path().filename().wstring().rfind(L"BLUS30187", 0) == 0) fs::remove_all(e.path(), ec);
+            if (e.is_directory() && e.path().filename().wstring().rfind(kSavePrefix, 0) == 0) fs::remove_all(e.path(), ec);
           size_t n = copy_saves(from, saves_dir());
           MessageBoxW(g_wnd, (std::to_wstring(n) + L" save(s) restored.").c_str(), kTitle, MB_ICONINFORMATION);
           break;
@@ -1076,7 +1071,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
   DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
   RECT r{0, 0, S(kClientW), S(kClientH)};
   AdjustWindowRectExForDpi(&r, style, FALSE, 0, g_dpi);
-  g_wnd = CreateWindowExW(0, wc.lpszClassName, L"ARMORED CORE for Answer - PC port " AC4_VERSION_W, style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left,
+  g_wnd = CreateWindowExW(0, wc.lpszClassName, L"ARMORED CORE 4 - PC port " AC4_VERSION_W, style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left,
                           r.bottom - r.top, nullptr, nullptr, inst, nullptr);
   UINT dpi = GetDpiForWindow(g_wnd);
   if (dpi != g_dpi) {  // the window opened on a monitor with another scale

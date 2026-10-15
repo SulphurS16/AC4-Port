@@ -50,7 +50,8 @@ struct Row {
 const char* const kPages[] = {"DISPLAY", "KEYBOARD / MOUSE", "MENU KEYS"};
 constexpr int kPageCount = 3;
 
-// Action names of the pad controls under the game's SIMPLE layout (GAME_NOTES), and the control.
+// Action names of the pad controls under the game's control TYPE A (GAME_NOTES "Controls"), and
+// the control.
 struct ControlText {
   const char* control;
   const char* action;
@@ -61,11 +62,11 @@ const ControlText kControlText[] = {
     {"lstick_left", "MOVE LEFT", "L STICK LEFT"},    {"lstick_right", "MOVE RIGHT", "L STICK RIGHT"},
     {"rstick_up", "LOOK UP", "R STICK UP"},          {"rstick_down", "LOOK DOWN", "R STICK DOWN"},
     {"rstick_left", "TURN LEFT", "R STICK LEFT"},    {"rstick_right", "TURN RIGHT", "R STICK RIGHT"},
-    {"cross", "RIGHT ARM WEAPON", "CROSS"},          {"square", "LEFT ARM WEAPON", "SQUARE"},
-    {"r1", "SHOULDER WEAPON", "R1"},                 {"circle", "SWITCH RIGHT WEAPON", "CIRCLE"},
-    {"triangle", "SWITCH LEFT WEAPON", "TRIANGLE"},  {"l2", "BOOST", "L2"},
-    {"r2", "QUICK BOOST", "R2"},                     {"l1", "OVERED BOOST", "L1"},
-    {"r3", "RESET VIEW", "R3"},                      {"l3", "L3 BUTTON", "L3"},
+    {"cross", "RIGHT WEAPON", "CROSS"},              {"square", "LEFT WEAPON", "SQUARE"},
+    {"circle", "SHOULDER WEAPON", "CIRCLE"},         {"r1", "SWITCH RIGHT WEAPON", "R1"},
+    {"l1", "SWITCH LEFT WEAPON", "L1"},              {"l2", "BOOST", "L2"},
+    {"r2", "QUICK BOOST", "R2"},                     {"triangle", "OVER BOOST", "TRIANGLE"},
+    {"r3", "RESET VIEW", "R3"},                      {"l3", "LOCK ON TARGET", "L3"},
     {"start", "PAUSE", "START"},                     {"select", "SELECT BUTTON", "SELECT"},
     {"up", "MENU UP", "D-PAD UP"},                   {"down", "MENU DOWN", "D-PAD DOWN"},
     {"left", "MENU LEFT", "D-PAD LEFT"},             {"right", "MENU RIGHT", "D-PAD RIGHT"},

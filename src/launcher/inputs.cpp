@@ -97,7 +97,6 @@ Found find_files(const fs::path& disc, const fs::path& files) {
       f.encrypted_modules = true;
     }
   }
-  f.regulation = pick(find_named(files, widen(ki::kRegulation.name)), ki::kRegulation);
   return f;
 }
 
@@ -113,8 +112,10 @@ Status check_disc(const fs::path& disc, const Found& f) {
   } catch (const std::exception& e) {
     return {Verdict::Bad, std::string("PARAM.SFO unreadable: ") + e.what(), ""};
   }
-  if (id != ki::kTitleId) return {Verdict::Bad, "This is " + id + ", not ARMORED CORE for Answer (USA, BLUS30187).", ""};
-  if (version != ki::kDiscVersion) return {Verdict::Bad, "BLUS30187 disc " + version + ": the port supports disc 01.01.", ""};
+  if (id != ki::kTitleId)
+    return {Verdict::Bad, "This is " + id + ", not " + ki::kTitleName + " (USA, " + ki::kTitleId + ").", ""};
+  if (version != ki::kDiscVersion)
+    return {Verdict::Bad, std::string(ki::kTitleId) + " disc " + version + ": the port supports disc " + ki::kDiscVersion + ".", ""};
   if (f.eboot_elf.empty())
     return {Verdict::Bad, "EBOOT.elf not found: decrypt PS3_GAME\\USRDIR\\EBOOT.BIN.",
             "EBOOT.elf found neither in " + narrow((disc / "PS3_GAME" / "USRDIR").wstring()) + " nor in the decrypted files' folder"};
@@ -122,7 +123,7 @@ Status check_disc(const fs::path& disc, const Found& f) {
   if (h != ki::kEbootElf.sha256)
     return {Verdict::Bad, "EBOOT.elf is not the decrypted executable of disc 01.01 (decrypt EBOOT.BIN again).",
             narrow(f.eboot_elf.wstring()) + ": sha256 " + h + ", expected " + ki::kEbootElf.sha256};
-  return {Verdict::Ok, "ARMORED CORE for Answer (BLUS30187, disc " + version + "), EBOOT.elf", ""};
+  return {Verdict::Ok, std::string(ki::kTitleName) + " (" + ki::kTitleId + ", disc " + version + "), EBOOT.elf", ""};
 }
 
 Status check_modules(const fs::path& files, const Found& f) {
@@ -166,15 +167,6 @@ Status check_modules(const fs::path& files, const Found& f) {
   return {Verdict::Ok, "The 10 system modules of system software " + std::string(ki::kSystemSoftware), ""};
 }
 
-Status check_update(const Found& f) {
-  if (f.regulation.empty()) return {Verdict::Optional, "", ""};
-  std::string h = hash_of(f.regulation);
-  if (h != ki::kRegulation.sha256)
-    return {Verdict::Optional, "regulation.bin is not the one of update 01.35: the disc's balance data is used.",
-            narrow(f.regulation.wstring()) + ": sha256 " + h + ", expected " + ki::kRegulation.sha256};
-  return {Verdict::Ok, "update 01.35", ""};
-}
-
 std::wstring files_help() {
   std::wstring mods;
   for (int i = 0; i < ki::kModuleCount; ++i) mods += (i ? L", " : L"") + widen(ki::kModules[i]);
@@ -183,7 +175,6 @@ std::wstring files_help() {
          L"\u2022 EBOOT.elf: the game's PS3_GAME\\USRDIR\\EBOOT.BIN, decrypted. It can stay next to EBOOT.BIN.\n\n"
          L"\u2022 The 10 system modules of PS3 system software " + widen(ki::kSystemSoftware) + L" (sys\\external), decrypted to .prx: " + mods +
          L"; with flashATRAC.pic from the same folder.\n\n"
-         L"\u2022 Optional, for the game's final balance data: regulation.bin of update 01.35.\n\n"
          L"Choose the folder that holds them (they may also be in folders below it), or let the launcher prepare them: Prepare "
          L"files asks for your RPCS3 and the PS3 system software 4.93 update file (PS3UPDAT.PUP from playstation.com).";
 }

@@ -1,8 +1,8 @@
 // Keyless preparation, the player path: files the player decrypted (for example with RPCS3's
 // Utilities > Decrypt PS3 Binaries) and the plain files that come with them, each verified by SHA-256 against
 // common/known_inputs.h, become the prepared inputs of the recompilers and the runtime:
-// eboot.elf, lle/<module>.elf (relocated to their fixed slots), the dev_flash file the game reads
-// and, when given, the update's game data. Nothing is decrypted here.
+// eboot.elf, lle/<module>.elf (relocated to their fixed slots) and the dev_flash file the game
+// reads. Nothing is decrypted here.
 #include <cstdio>
 
 #include "common/known_inputs.h"
@@ -35,7 +35,7 @@ void copy_verified(const fs::path& from, const fs::path& to) {
 }  // namespace
 
 std::string import_inputs(const ImportInputs& in, const fs::path& out, const fs::path& flash_out) {
-  for (const fs::path& p : {in.disc, in.eboot_elf.parent_path(), in.modules_dir, in.flash_atrac.parent_path(), in.game_data})
+  for (const fs::path& p : {in.disc, in.eboot_elf.parent_path(), in.modules_dir, in.flash_atrac.parent_path()})
     if (!p.empty()) add_protected_root(p);  // inputs are only read
   std::string m = "# ac4-prep manifest (keyless import of the player's decrypted files; machine-local)\n";
 
@@ -49,7 +49,7 @@ std::string import_inputs(const ImportInputs& in, const fs::path& out, const fs:
     return it != sfo.end() && std::holds_alternative<std::string>(it->second) ? std::get<std::string>(it->second) : std::string();
   };
   if (str("TITLE_ID") != ki::kTitleId)
-    throw std::runtime_error("the disc folder holds " + str("TITLE_ID") + ", not ARMORED CORE for Answer (USA, BLUS30187)");
+    throw std::runtime_error("the disc folder holds " + str("TITLE_ID") + ", not " + ki::kTitleName + " (USA, " + ki::kTitleId + ")");
   if (str("VERSION") != ki::kDiscVersion)
     throw std::runtime_error("the disc folder is disc version " + str("VERSION") + "; the port supports disc version 01.01");
   m += "[disc PARAM.SFO]\n" + sfo_to_text(sfo);
@@ -90,22 +90,6 @@ std::string import_inputs(const ImportInputs& in, const fs::path& out, const fs:
   copy_verified(in.flash_atrac, flash_out / "sys" / "external" / ki::kFlashAtrac.name);
   m += strprintf("[dev_flash]\nsys/external/flashATRAC.pic sha256=%s\n", fh.c_str());
 
-  // The update's game data (optional): only the given data is installed.
-  fs::remove_all(out / "update", ec);
-  if (!in.game_data.empty()) {
-    fs::path reg = in.game_data / "USRDIR" / ki::kRegulation.name;  // the update's folder
-    if (!fs::is_regular_file(reg, ec)) reg = in.game_data / ki::kRegulation.name;  // or regulation.bin on its own
-    std::string rh = verify(reg, ki::kRegulation, "the update's regulation.bin");
-    fs::path dst = out / "update" / ki::kUpdateContentId;
-    copy_verified(reg, dst / "USRDIR" / ki::kRegulation.name);
-    m += strprintf("[update %s]\nUSRDIR/regulation.bin sha256=%s\n", ki::kUpdateContentId, rh.c_str());
-    for (const char* f : ki::kUpdateFiles) {
-      fs::path src = in.game_data / f;
-      if (!fs::is_regular_file(src, ec)) continue;
-      copy_verified(src, dst / f);
-      m += strprintf("%s sha256=%s\n", f, crypto::sha256_file_hex(src.string()).c_str());
-    }
-  }
   write_text(out / "manifest.txt", m);
   return m;
 }

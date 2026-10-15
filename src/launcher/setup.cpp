@@ -73,7 +73,7 @@ std::string content_hash(const fs::path& p) {
   }
 }
 
-fs::path prepared(const SetupConfig& c) { return c.data / "game" / "BLUS30187"; }
+fs::path prepared(const SetupConfig& c) { return c.data / "game" / ki::kTitleId; }
 // The one dev_flash file the game reads (flashATRAC.pic), imported from the player's files.
 fs::path flash(const SetupConfig& c) { return c.data / "game" / "dev_flash"; }
 fs::path build_dir(const SetupConfig& c) { return c.data / "build"; }
@@ -82,16 +82,6 @@ fs::path tools_dir(const SetupConfig& c) { return c.data / "tools"; }
 // (sources elsewhere would repeat the whole install path in every object path).
 fs::path gen_dir(const SetupConfig& c) { return build_dir(c) / "gen"; }
 
-// The update's game data is imported only when it is the verified 01.35: the folder of its
-// regulation.bin, or the update's folder when that is its USRDIR (ac4-prep import --game-data).
-fs::path verified_game_data(const Found& f) {
-  if (f.regulation.empty() || content_hash(f.regulation) != ki::kRegulation.sha256) return {};
-  fs::path dir = f.regulation.parent_path();
-  std::wstring name = dir.filename().wstring();
-  for (auto& ch : name) ch = wchar_t(towupper(ch));
-  return name == L"USRDIR" ? dir.parent_path() : dir;
-}
-
 // Each step's record: what it was made from. A step is redone when its record differs.
 std::string stamp(const SetupConfig& c, size_t step) {
   switch (step) {
@@ -99,13 +89,12 @@ std::string stamp(const SetupConfig& c, size_t step) {
       Found f = find_files(c.disc, c.files);
       std::string s = "disc " + c.disc.generic_string() + "\neboot " + file_stamp(f.eboot_elf) + "\n";
       for (int i = 0; i < ki::kModuleCount; ++i) s += std::string(ki::kModules[i]) + " " + file_stamp(f.modules_dir / ki::module(ki::kModules[i])->name) + "\n";
-      fs::path gd = verified_game_data(f);
-      return s + "flash " + file_stamp(f.modules_dir / ki::kFlashAtrac.name) + "\nupdate " +
-             (gd.empty() ? std::string("none") : file_stamp(f.regulation));
+      return s + "flash " + file_stamp(f.modules_dir / ki::kFlashAtrac.name);
     }
     case kRecompile:
       return "prepared " + content_hash(prepared(c) / "manifest.txt") + "\nlle " + content_hash(prepared(c) / "lle" / "manifest.txt") +
-             "\nhooks " + content_hash(c.src / "src" / "runtime" / "game" / "hooks.txt") + "\nrecompiler " +
+             "\nhooks " + content_hash(c.src / "src" / "runtime" / "game" / "hooks.txt") + "\npatches " +
+             content_hash(c.src / "src" / "runtime" / "game" / "patches.txt") + "\nrecompiler " +
              file_stamp(build_dir(c) / "ac4-recomp.exe");
     case kSpu:
       return "prepared " + content_hash(prepared(c) / "manifest.txt") + "\nlle " + content_hash(prepared(c) / "lle" / "manifest.txt") +
@@ -443,8 +432,6 @@ void Setup::run(SetupConfig c) {
                                           w(f.modules_dir), L"--flash-file", w(f.modules_dir / ki::kFlashAtrac.name),
                                           L"--out",        w(prepared(c)),   L"--flash-out",
                                           w(flash(c))};
-           fs::path gd = verified_game_data(f);
-           if (!gd.empty()) a.insert(a.end(), {L"--game-data", w(gd)});
            return exec(prep, a, c.data);
          },
          "Importing the game files failed"},
@@ -453,7 +440,8 @@ void Setup::run(SetupConfig c) {
            fs::remove_all(gen_dir(c) / "ppu", ec);
            std::vector<std::wstring> a = {L"emit", w(prepared(c) / "eboot.elf"), w(gen_dir(c) / "ppu")};
            for (const char* m : ki::kModules) a.insert(a.end(), {L"--module", w(prepared(c) / "lle" / (widen(m) + L".elf"))});
-           a.insert(a.end(), {L"--hooks", w(c.src / "src" / "runtime" / "game" / "hooks.txt")});
+           a.insert(a.end(), {L"--hooks", w(c.src / "src" / "runtime" / "game" / "hooks.txt"), L"--patches",
+                              w(c.src / "src" / "runtime" / "game" / "patches.txt")});
            return exec(build_dir(c) / "ac4-recomp.exe", a, c.data);
          },
          "Translating the game code failed"},
