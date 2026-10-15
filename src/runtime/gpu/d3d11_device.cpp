@@ -379,7 +379,7 @@ void present_texture(ID3D11ShaderResourceView* srv, u32 src_w, u32 src_h) {
     const float black[4] = {0, 0, 0, 1};
     c->ClearRenderTargetView(g_dev.backbuffer_rtv, black);
     draw_to(g_dev.backbuffer_rtv, g_dev.width, g_dev.height, &fit);
-    if (ui::is_open()) {  // PC SETTINGS over the game's frame, at the window's resolution
+    if (ui::screen_up()) {  // PC SETTINGS or a system dialog over the game's frame, at the window's resolution
       ID3D11Texture2D* bb = nullptr;
       g_dev.swap->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb));
       if (bb) {
@@ -415,7 +415,7 @@ std::vector<PendingCapture> g_captures;
 
 void begin_capture(u32 index) {
   // While PC SETTINGS is open the capture shows the window as composed (the screen included).
-  ID3D11Texture2D* src = ui::is_open() && g_ui_copy ? g_ui_copy : g_last;
+  ID3D11Texture2D* src = ui::screen_up() && g_ui_copy ? g_ui_copy : g_last;
   if (!src || g_captures.size() >= 8) return;
   D3D11_TEXTURE2D_DESC td{};
   src->GetDesc(&td);

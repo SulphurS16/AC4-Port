@@ -5,6 +5,9 @@
 // keyboard and controller navigate it; while it is open the game sees its controller at rest.
 // Changes apply at once and are saved to the shared settings file (runtime/settings.h).
 #pragma once
+#include <string>
+#include <vector>
+
 #include "common/bytes.h"
 
 struct ID3D11Device;
@@ -12,6 +15,32 @@ struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
 
 namespace rt::ui {
+
+// A system dialog drawn in the game's picture (runtime/sysdialog.cpp keeps its state and input;
+// this module lays it out and draws it in the style of the PC SETTINGS screen).
+struct DialogView {
+  enum Kind { List, Question, Message, Text } kind = Message;
+  std::string heading, text;                       // UTF-8; '\n' breaks the text's lines
+  std::vector<std::string> rows, dates, details;   // List: one per row
+  int focus = 0, scroll = 0;                       // List: the highlighted row, the first one shown
+  int button = 0;                                  // the highlighted button (0: OK / YES, 1: BACK / NO; -1: none)
+  std::u16string edit;                             // Text: what was typed
+  bool edit_selected = false;                      // Text: the initial text, replaced by the first key
+  u32 max_chars = 0;
+  std::u16string keys;                             // Text: the on-screen keyboard's characters
+  int key = -1;                                    // Text: the highlighted key (-1: none)
+};
+constexpr int kDialogListRows = 6;  // rows shown at once
+constexpr int kDialogKeyCols = 12;  // on-screen keyboard columns
+struct DialogHit {
+  enum What { None, Row, Button, Key } what = None;
+  int index = -1;  // Row: the row's index in the list; Button: 0 / 1; Key: the key's index
+};
+// What is under client pixel (x, y) of the window (window thread).
+DialogHit dialog_hit(const DialogView& v, int x, int y);
+
+// Something of the port's own is on screen (PC SETTINGS or a system dialog): drawn over the frame.
+bool screen_up();
 
 bool is_open();  // any thread
 // The SYSTEM menu's PC SETTINGS row was chosen: opens the screen; closing it returns to the menu.

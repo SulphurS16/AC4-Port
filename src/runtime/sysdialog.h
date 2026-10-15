@@ -1,15 +1,21 @@
-// System dialogs shown on behalf of system utilities (save data lists, confirmations, errors).
-// On the console these are system overlays driven by the controller; here they are modal windows
-// owned by the game window, usable with mouse, keyboard or the first XInput controller (D-pad or
-// left stick to move, A/Cross to accept, B/Circle to go back). While one is open the game reads no
-// pad input, as the system holds the controller on the console. For unattended runs,
-// --dialog "answer,..." answers them in order (choose:N | choose:text=STRING (first item whose
-// texts contain STRING) | choose:cancel | yes | no | ok | text:STRING | cancel).
+// System dialogs shown on behalf of system utilities (save data lists, confirmations, errors, the
+// on-screen keyboard's text entry). On the console these are system overlays driven by the
+// controller; here they are drawn in the game's picture (ui/overlay.cpp draws them), so the game
+// window keeps its mode, size, position and focus (exclusive fullscreen stays). Mouse, keyboard or
+// the first XInput controller answer them (D-pad or left stick to move, A/Cross to accept,
+// B/Circle to go back). While one is open the game reads no pad input, as the system holds the
+// controller on the console. For unattended runs, --dialog "answer,..." answers them in order
+// (choose:N | choose:text=STRING (first item whose texts contain STRING) | choose:cancel | yes | no
+// | ok | text:STRING | cancel).
 #pragma once
 #include <string>
 #include <vector>
 
 #include "common/bytes.h"
+
+namespace rt::ui {
+struct DialogView;
+}
 
 namespace rt::sysdlg {
 
@@ -32,5 +38,20 @@ bool text_input(const std::string& prompt, const std::u16string& initial, u32 ma
 void abort();
 // A dialog is open (the pad is held by the system).
 bool active();
+
+// The dialog on screen (window thread: the window procedure routes the input here while one is
+// shown). Keys and typed characters, the mouse in client pixels, the controller once per pass of
+// the window's loop (tick).
+bool shown();
+void on_key(u32 vk, bool down, bool repeat);
+void on_char(u32 ch);
+void on_mouse_move(int x, int y);
+void on_mouse_button(int button, bool down, int x, int y);  // 0 left, 1 right
+void on_wheel(int delta);
+void tick();
+// The mouse was used in the dialog last (its cursor shows; keys or a controller hide it).
+bool cursor_wanted();
+// Presenting thread: a copy of the dialog on screen for drawing; false when none is.
+bool view(ui::DialogView* out);
 
 }  // namespace rt::sysdlg

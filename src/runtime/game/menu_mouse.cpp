@@ -34,6 +34,7 @@
 #include "runtime/input.h"
 #include "runtime/log.h"
 #include "runtime/memory.h"
+#include "runtime/sysdialog.h"
 #include "runtime/ui/overlay.h"
 
 namespace rt::game {
@@ -380,7 +381,7 @@ void drive_slider(float gx) {
 // One frame of the menu mouse on the game's main thread (before the pads become key messages).
 void frame(Ctx& ctx) {
   u32 framework = u32(ctx.r[3]);
-  if (ui::is_open() || !valid(framework)) return;
+  if (ui::is_open() || sysdlg::shown() || !valid(framework)) return;
   // Probe: which dialog takes keys now.
   u32 msg = (u32(ctx.r[1]) - 0x80) & ~15u;
   ppu::w32(msg, kKeyMessage);

@@ -18,6 +18,7 @@
 #include "runtime/input.h"
 #include "runtime/log.h"
 #include "runtime/settings.h"
+#include "runtime/sysdialog.h"
 #include "runtime/ui/overlay.h"
 
 namespace rt::gpu {
@@ -138,7 +139,8 @@ HCURSOR make_menu_cursor(UINT dpi) {
 // loading screens, a menu driven by keys or a controller.
 HCURSOR client_cursor() {
   if (g_mouse_captured && !input_isolated()) return nullptr;
-  if (game::menu_cursor_visible() || ui::is_open()) {
+  bool menu = sysdlg::shown() ? sysdlg::cursor_wanted() : game::menu_cursor_visible() || ui::is_open();
+  if (menu) {
     static HCURSOR cur = nullptr;
     static UINT cur_dpi = 0;
     UINT dpi = GetDpiForWindow(g_hwnd);
@@ -280,7 +282,7 @@ void set_client_size(int w, int h) {
 // Mouse look takes the mouse in gameplay while the window is in front, unless F1 gave it back or
 // a controller was used after the mouse (window thread).
 void capture_for_gameplay() {
-  if (g_mouse_captured || g_user_released || ui::is_open() || game::input_context() != game::InputContext::Gameplay ||
+  if (g_mouse_captured || g_user_released || ui::is_open() || sysdlg::shown() || game::input_context() != game::InputContext::Gameplay ||
       game::controller_used_last())
     return;
   if (input_isolated() || GetForegroundWindow() == g_hwnd) set_mouse_capture(true);
@@ -308,9 +310,11 @@ std::condition_variable g_call_cv;
 std::deque<Call*> g_calls;
 
 LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-  const bool overlay = ui::is_open();
+  const bool dialog = sysdlg::shown();  // a system dialog takes the input first, then PC SETTINGS
+  const bool overlay = dialog || ui::is_open();
   switch (msg) {
     case WM_CLOSE:
+      if (dialog) sysdlg::abort();  // answered as "back", so the game can go on to its exit
       g_close = true;
       return 0;  // the runtime asks the game to exit first
     case WM_DESTROY:
@@ -327,7 +331,8 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       break;  // DefWindowProc cleans up the raw input buffer
     }
     case WM_MOUSEMOVE: {
-      if (overlay) ui::on_mouse_move(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+      if (dialog) sysdlg::on_mouse_move(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+      else if (overlay) ui::on_mouse_move(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
       POINT sp{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       ClientToScreen(h, &sp);
       bool moved = sp.x != g_pointer.x || sp.y != g_pointer.y;
@@ -378,6 +383,11 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                    : msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP ? 2
                    : GET_XBUTTON_WPARAM(wp) == XBUTTON1          ? 3
                                                                  : 4;
+      if (dialog) {
+        sysdlg::on_mouse_button(button, down, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        if (GetCapture() == h) ReleaseCapture();
+        return msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP ? TRUE : 0;
+      }
       if (overlay) {
         ui::on_mouse_button(button, down, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         if (down && ui::is_open()) SetCapture(h);  // drags in PC SETTINGS
@@ -402,6 +412,10 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       break;
     }
     case WM_MOUSEWHEEL:
+      if (dialog) {
+        sysdlg::on_wheel(GET_WHEEL_DELTA_WPARAM(wp));
+        return 0;
+      }
       if (overlay) {
         ui::on_wheel(GET_WHEEL_DELTA_WPARAM(wp));
         return 0;
@@ -443,6 +457,10 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
       }
+      if (dialog) {
+        sysdlg::on_key(u32(wp), true, repeat);
+        return 0;  // keys pressed in a system dialog never reach the game
+      }
       if (overlay) {
         ui::on_key(u32(wp), true, repeat);
         return 0;  // keys pressed in PC SETTINGS never reach the game
@@ -454,8 +472,11 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYUP:
     case WM_SYSKEYUP:
       input_key(u32(wp), false);  // releases always reach the key state (no stuck keys)
-      if (overlay) ui::on_key(u32(wp), false, false);
+      if (overlay && !dialog) ui::on_key(u32(wp), false, false);
       if (msg == WM_SYSKEYUP && wp != VK_F10 && wp != VK_MENU) break;
+      return 0;
+    case WM_CHAR:
+      if (dialog) sysdlg::on_char(u32(wp));  // text entry
       return 0;
     case WM_SYSCHAR:
       return 0;  // no menu beep for Alt+key
@@ -585,6 +606,7 @@ bool window_pump() {
     g_call_cv.notify_all();
   }
   ui::tick();
+  sysdlg::tick();
   return g_alive;
 }
 

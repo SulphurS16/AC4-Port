@@ -23,6 +23,7 @@
 #include "runtime/input.h"
 #include "runtime/log.h"
 #include "runtime/settings.h"
+#include "runtime/sysdialog.h"
 
 namespace rt::ui {
 namespace {
@@ -321,6 +322,64 @@ Canvas canvas_for(int w, int h) {
   c.ox = std::floor((float(w) - kW * c.scale) / 2);
   c.oy = std::floor((float(h) - kH * c.scale) / 2);
   return c;
+}
+
+// System dialogs on the same canvas: a framed panel over the dimmed game, its heading and rule,
+// then the list (rows, the highlighted row's details), the question's or message's text, or the
+// text entry (prompt, typed text, on-screen keyboard, help); buttons at the bottom right.
+struct Box {
+  float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  bool has(float x, float y) const { return x >= x0 && x < x1 && y >= y0 && y < y1; }
+};
+struct DialogLayout {
+  Box panel, heading, text, edit, detail, help;
+  float rule_y = 0;
+  std::vector<Box> rows;  // the rows shown: row scroll + i
+  std::vector<Box> keys;
+  Box buttons[2];
+  int buttons_n = 0;
+};
+constexpr float kDlgRowPitch = 44, kDlgRowH = 37, kDlgKeyPitch = 46, kDlgKeyH = 40, kDlgButtonW = 160;
+DialogLayout dialog_layout(const DialogView& v) {
+  DialogLayout L;
+  bool tall = v.kind == DialogView::List || v.kind == DialogView::Text;
+  L.panel = tall ? Box{190, 96, 1090, 664} : Box{290, 220, 990, 500};
+  float x0 = L.panel.x0 + 36, x1 = L.panel.x1 - 36;
+  L.heading = {x0, L.panel.y0 + 16, x1, L.panel.y0 + 56};
+  L.rule_y = L.panel.y0 + 64;
+  float by0 = L.panel.y1 - 58, by1 = by0 + kDlgRowH;
+  if (v.kind == DialogView::Message) {
+    L.buttons_n = 1;
+    L.buttons[0] = {x1 - kDlgButtonW, by0, x1, by1};
+  } else {
+    L.buttons_n = 2;
+    L.buttons[0] = {x1 - 2 * kDlgButtonW - 10, by0, x1 - kDlgButtonW - 10, by1};
+    L.buttons[1] = {x1 - kDlgButtonW, by0, x1, by1};
+  }
+  switch (v.kind) {
+    case DialogView::List: {
+      float top = L.rule_y + 16;
+      int n = std::min(kDialogListRows, int(v.rows.size()) - v.scroll);
+      for (int i = 0; i < n; ++i) L.rows.push_back({x0, top + float(i) * kDlgRowPitch, x1 - 26, top + float(i) * kDlgRowPitch + kDlgRowH});
+      L.detail = {x0 + 14, top + kDialogListRows * kDlgRowPitch + 4, x1, by0 - 8};
+      break;
+    }
+    case DialogView::Question:
+    case DialogView::Message: L.text = {x0, L.rule_y + 16, x1, by0 - 10}; break;
+    case DialogView::Text: {
+      L.text = {x0, L.rule_y + 12, x1, L.rule_y + 76};
+      L.edit = {x0, L.rule_y + 84, x1, L.rule_y + 126};
+      int n = int(v.keys.size()), cols = kDialogKeyCols, rows = (n + cols - 1) / cols;
+      float kw = (x1 - x0) / float(cols), ky = L.rule_y + 140;
+      for (int i = 0; i < n; ++i) {
+        float kx = x0 + float(i % cols) * kw, y = ky + float(i / cols) * kDlgKeyPitch;
+        L.keys.push_back({kx + 2, y, kx + kw - 2, y + kDlgKeyH});
+      }
+      L.help = {x0, ky + float(rows) * kDlgKeyPitch + 6, x1, by0 - 6};
+      break;
+    }
+  }
+  return L;
 }
 
 int list_rows() { return int(g_rows.size()) - 1; }  // without the buttons row
@@ -648,6 +707,24 @@ void load_xinput() {
 // ---------------------------------------------------------------------------------------------
 bool is_open() { return g_state.load(std::memory_order_relaxed) != State::Closed; }
 
+bool screen_up() { return is_open() || sysdlg::shown(); }
+
+DialogHit dialog_hit(const DialogView& v, int px, int py) {
+  int w = 0, h = 0;
+  gpu::window_client_size(&w, &h);
+  if (w <= 0 || h <= 0) return {};
+  Canvas c = canvas_for(w, h);
+  float x = (float(px) - c.ox) / c.scale, y = (float(py) - c.oy) / c.scale;
+  DialogLayout L = dialog_layout(v);
+  for (size_t i = 0; i < L.rows.size(); ++i)
+    if (L.rows[i].has(x, y)) return {DialogHit::Row, v.scroll + int(i)};
+  for (int b = 0; b < L.buttons_n; ++b)
+    if (L.buttons[b].has(x, y)) return {DialogHit::Button, b};
+  for (size_t i = 0; i < L.keys.size(); ++i)
+    if (L.keys[i].has(x, y)) return {DialogHit::Key, int(i)};
+  return {};
+}
+
 void open_from_menu() {
   g_open_request = true;  // opened on the window thread (tick)
 }
@@ -864,6 +941,8 @@ struct Gfx {
   IDWriteFactory* dw = nullptr;
   IDWriteTextFormat *title = nullptr, *subtitle = nullptr, *label = nullptr, *value = nullptr, *small = nullptr, *help = nullptr,
                     *tab = nullptr, *button = nullptr;
+  // System dialogs: heading, wrapped text, list rows, dates, on-screen keys.
+  IDWriteTextFormat *dlg_title = nullptr, *body = nullptr, *row = nullptr, *date = nullptr, *key = nullptr;
   ID2D1SolidColorBrush* brush = nullptr;
   ID2D1LinearGradientBrush* select = nullptr;
   ID3DDeviceContextState* state = nullptr;
@@ -920,7 +999,17 @@ bool init_gfx(ID3D11Device* dev) {
   g_gfx.help = text_format(sans, 20, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING);
   g_gfx.tab = text_format(sans, 17, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
   g_gfx.button = text_format(serif, 25, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
-  if (!g_gfx.title || !g_gfx.subtitle || !g_gfx.label || !g_gfx.value || !g_gfx.small || !g_gfx.help || !g_gfx.tab || !g_gfx.button)
+  g_gfx.dlg_title = text_format(serif, 34, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING);
+  g_gfx.body = text_format(sans, 19, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING);
+  if (g_gfx.body) {
+    g_gfx.body->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    g_gfx.body->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+  }
+  g_gfx.row = text_format(sans, 20, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING);
+  g_gfx.date = text_format(sans, 16, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING);
+  g_gfx.key = text_format(sans, 18, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
+  if (!g_gfx.title || !g_gfx.subtitle || !g_gfx.label || !g_gfx.value || !g_gfx.small || !g_gfx.help || !g_gfx.tab || !g_gfx.button ||
+      !g_gfx.dlg_title || !g_gfx.body || !g_gfx.row || !g_gfx.date || !g_gfx.key)
     return false;
   g_gfx.dc->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1), &g_gfx.brush);
   D2D1_GRADIENT_STOP stops[2] = {{0, D2D1::ColorF(0.27f, 0.32f, 0.37f, 1)}, {1, D2D1::ColorF(0.10f, 0.12f, 0.15f, 1)}};
@@ -1079,28 +1168,115 @@ void draw(const Snapshot& s, u32 w, u32 h) {
   text(help, g_gfx.help, 96, 640, kW - 40, 675, 0.9f);
 }
 
+// UTF-8 text (save titles and details carry full-width characters).
+std::wstring wide(const std::string& s) {
+  if (s.empty()) return {};
+  int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0);
+  std::wstring w(size_t(n), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), w.data(), n);
+  return w;
+}
+void wtext(const std::wstring& w, IDWriteTextFormat* f, const Box& b, float g) {
+  color(g);
+  g_gfx.dc->DrawText(w.c_str(), UINT32(w.size()), f, D2D1::RectF(b.x0, b.y0, b.x1, b.y1), g_gfx.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+
+void draw_dialog(const DialogView& v, u32 w, u32 h) {
+  ID2D1DeviceContext* dc = g_gfx.dc;
+  dc->SetTransform(D2D1::Matrix3x2F::Identity());
+  dc->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+  dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+  g_gfx.brush->SetColor(D2D1::ColorF(0, 0, 0, 0.6f));  // the game, dimmed, behind
+  dc->FillRectangle(D2D1::RectF(0, 0, float(w), float(h)), g_gfx.brush);
+  Canvas c = canvas_for(int(w), int(h));
+  dc->SetTransform(D2D1::Matrix3x2F::Scale(c.scale, c.scale) * D2D1::Matrix3x2F::Translation(c.ox, c.oy));
+  DialogLayout L = dialog_layout(v);
+  const Box& p = L.panel;
+  g_gfx.brush->SetColor(D2D1::ColorF(0.035f, 0.04f, 0.05f, 0.97f));
+  dc->FillRectangle(D2D1::RectF(p.x0, p.y0, p.x1, p.y1), g_gfx.brush);
+  frame(p.x0, p.y0, p.x1, p.y1, 0.55f, 0.28f);
+  wtext(wide(v.heading), g_gfx.dlg_title, L.heading, 0.86f);
+  line(L.heading.x0, L.rule_y + 0.5f, L.heading.x1, L.rule_y + 0.5f, 0.62f);
+  switch (v.kind) {
+    case DialogView::List: {
+      for (size_t i = 0; i < L.rows.size(); ++i) {
+        int r = v.scroll + int(i);
+        const Box& b = L.rows[i];
+        if (r == v.focus) selected_fill(b.x0 + 1, b.y0 + 1, b.x1 - 1, b.y1 - 1);
+        frame(b.x0, b.y0, b.x1, b.y1, 0.55f, 0.28f);
+        wtext(wide(v.rows[size_t(r)]), g_gfx.row, Box{b.x0 + 16, b.y0, b.x1 - 200, b.y1}, 0.86f);
+        if (size_t(r) < v.dates.size()) wtext(wide(v.dates[size_t(r)]), g_gfx.date, Box{b.x1 - 200, b.y0, b.x1 - 16, b.y1}, 0.62f);
+      }
+      if (!L.rows.empty()) {
+        if (v.scroll > 0) triangle(L.rows.front().x1 + 13, L.rows.front().y0 + 12, 0, -1, 0.5f);
+        if (v.scroll + kDialogListRows < int(v.rows.size())) triangle(L.rows.back().x1 + 13, L.rows.back().y1 - 12, 0, 1, 0.5f);
+      }
+      if (v.focus >= 0 && size_t(v.focus) < v.details.size()) wtext(wide(v.details[size_t(v.focus)]), g_gfx.body, L.detail, 0.72f);
+      break;
+    }
+    case DialogView::Question:
+    case DialogView::Message: wtext(wide(v.text), g_gfx.body, L.text, 0.86f); break;
+    case DialogView::Text: {
+      wtext(wide(v.text), g_gfx.body, L.text, 0.8f);
+      const Box& e = L.edit;
+      if (v.edit_selected) selected_fill(e.x0 + 1, e.y0 + 1, e.x1 - 1, e.y1 - 1);  // replaced by the first key
+      frame(e.x0, e.y0, e.x1, e.y1, 0.55f, 0.28f);
+      std::wstring typed(v.edit.begin(), v.edit.end());
+      wtext(v.edit_selected ? typed : typed + L"_", g_gfx.row, Box{e.x0 + 16, e.y0, e.x1 - 110, e.y1}, 0.9f);
+      wtext(std::to_wstring(v.edit.size()) + L" / " + std::to_wstring(v.max_chars), g_gfx.date, Box{e.x1 - 110, e.y0, e.x1 - 16, e.y1}, 0.55f);
+      for (size_t i = 0; i < L.keys.size(); ++i) {
+        const Box& b = L.keys[i];
+        bool on = int(i) == v.key;
+        if (on) selected_fill(b.x0 + 1, b.y0 + 1, b.x1 - 1, b.y1 - 1);
+        color(on ? 0.75f : 0.35f);
+        dc->DrawRectangle(D2D1::RectF(b.x0 + 0.5f, b.y0 + 0.5f, b.x1 - 0.5f, b.y1 - 0.5f), g_gfx.brush, 1.0f);
+        std::wstring label = v.keys[i] == u' ' ? L"SPACE" : std::wstring(1, wchar_t(v.keys[i]));
+        wtext(label, g_gfx.key, b, on ? 0.95f : 0.8f);
+      }
+      wtext(L"Keyboard: type, BACKSPACE deletes, ENTER is OK, ESC goes back.  Controller: D-pad and A type, X deletes, "
+            L"Y adds a space, START is OK, B goes back.",
+            g_gfx.body, L.help, 0.58f);
+      break;
+    }
+  }
+  static const char* const kNames[3][2] = {{"OK", "BACK"}, {"YES", "NO"}, {"OK", ""}};
+  const char* const* names = kNames[v.kind == DialogView::Question ? 1 : v.kind == DialogView::Message ? 2 : 0];
+  for (int b = 0; b < L.buttons_n; ++b) {
+    const Box& r = L.buttons[b];
+    if (v.button == b) selected_fill(r.x0 + 1, r.y0 + 1, r.x1 - 1, r.y1 - 1);
+    frame(r.x0, r.y0, r.x1, r.y1, 0.55f, 0.28f);
+    text(names[b], g_gfx.button, r.x0, r.y0, r.x1, r.y1, 0.86f);
+  }
+}
+
 }  // namespace
 
 void render(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* backbuffer, u32 w, u32 h) {
-  if (!is_open() || !backbuffer) return;
+  if (!screen_up() || !backbuffer) return;
   if (!g_gfx.tried) {
     g_gfx.ok = init_gfx(dev);
     if (!g_gfx.ok) LOG_W("ui", "PC SETTINGS cannot be drawn (Direct2D/DirectWrite unavailable)");
   }
   if (!g_gfx.ok) return;
   Snapshot s;
+  bool page = false;
   {
     std::lock_guard<std::recursive_mutex> lk(g_mu);
-    if (g_state.load() == State::Closed) return;
-    s.rows = g_rows;
-    s.page = g_page;
-    s.focus = g_focus;
-    s.slot = g_slot;
-    s.scroll = g_scroll;
-    s.capturing = g_capturing;
-    if (!g_toast.empty() && Clock::now() < g_toast_until) s.toast = g_toast;
+    if (g_state.load() != State::Closed) {
+      page = true;
+      s.rows = g_rows;
+      s.page = g_page;
+      s.focus = g_focus;
+      s.slot = g_slot;
+      s.scroll = g_scroll;
+      s.capturing = g_capturing;
+      if (!g_toast.empty() && Clock::now() < g_toast_until) s.toast = g_toast;
+    }
   }
-  if (s.rows.empty()) return;
+  if (s.rows.empty()) page = false;
+  DialogView dv;
+  bool dialog = sysdlg::view(&dv);  // a system dialog: over the game (and over PC SETTINGS)
+  if (!page && !dialog) return;
   ID3D11DeviceContext1* ctx1 = nullptr;
   if (FAILED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1)))) return;
   ID3DDeviceContextState* prev = nullptr;
@@ -1113,7 +1289,8 @@ void render(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* backbu
     if (SUCCEEDED(g_gfx.dc->CreateBitmapFromDxgiSurface(surface, &bp, &target))) {
       g_gfx.dc->SetTarget(target);
       g_gfx.dc->BeginDraw();
-      draw(s, w, h);
+      if (page) draw(s, w, h);
+      if (dialog) draw_dialog(dv, w, h);
       HRESULT hr = g_gfx.dc->EndDraw();
       if (FAILED(hr)) LOG_W("ui", "PC SETTINGS drawing failed (0x%08lx)", (unsigned long)hr);
       g_gfx.dc->SetTarget(nullptr);

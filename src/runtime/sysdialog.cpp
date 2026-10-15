@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <ctime>
 #include <deque>
@@ -13,10 +16,14 @@
 
 #include "runtime/config.h"
 #include "runtime/gpu/window.h"
+#include "runtime/input.h"
 #include "runtime/log.h"
+#include "runtime/ui/overlay.h"
 
 namespace rt::sysdlg {
 namespace {
+
+using Clock = std::chrono::steady_clock;
 
 std::atomic<int> g_active{0};
 std::mutex g_mu;  // one dialog at a time
@@ -25,12 +32,12 @@ std::mutex g_mu;  // one dialog at a time
 bool take_live(std::string*) { return false; }  // player builds: no scripted answers
 bool scripted(std::string*) { return false; }
 
-std::wstring widen(const std::string& s) {
+std::u16string utf16(const std::string& s) {
   if (s.empty()) return {};
   int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0);
   std::wstring w(size_t(n), L'\0');
   MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), w.data(), n);
-  return w;
+  return std::u16string(w.begin(), w.end());
 }
 
 std::string date_text(s64 t) {
@@ -43,7 +50,7 @@ std::string date_text(s64 t) {
   return b;
 }
 
-// ---- controller navigation ----
+// ---- controller ----
 using XGetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 XGetState xinput() {
   static XGetState fn = [] {
@@ -54,287 +61,322 @@ XGetState xinput() {
   return fn;
 }
 enum Pad : u32 { P_UP = 1, P_DOWN = 2, P_LEFT = 4, P_RIGHT = 8, P_ACCEPT = 16, P_BACK = 32, P_X = 64, P_Y = 128, P_START = 256 };
+constexpr u32 kDirections = P_UP | P_DOWN | P_LEFT | P_RIGHT;
 u32 pad_now() {
-  XINPUT_STATE xs{};
   XGetState get = xinput();
-  if (!get || get(0, &xs) != ERROR_SUCCESS) return 0;
-  const auto& g = xs.Gamepad;
+  if (!get || input_isolated()) return 0;
   u32 b = 0;
-  if ((g.wButtons & XINPUT_GAMEPAD_DPAD_UP) || g.sThumbLY > 16000) b |= P_UP;
-  if ((g.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) || g.sThumbLY < -16000) b |= P_DOWN;
-  if ((g.wButtons & XINPUT_GAMEPAD_DPAD_LEFT) || g.sThumbLX < -16000) b |= P_LEFT;
-  if ((g.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) || g.sThumbLX > 16000) b |= P_RIGHT;
-  if (g.wButtons & XINPUT_GAMEPAD_A) b |= P_ACCEPT;
-  if (g.wButtons & XINPUT_GAMEPAD_B) b |= P_BACK;
-  if (g.wButtons & XINPUT_GAMEPAD_X) b |= P_X;
-  if (g.wButtons & XINPUT_GAMEPAD_Y) b |= P_Y;
-  if (g.wButtons & XINPUT_GAMEPAD_START) b |= P_START;
+  for (DWORD port = 0; port < 4; ++port) {
+    XINPUT_STATE xs{};
+    if (get(port, &xs) != ERROR_SUCCESS) continue;
+    const auto& g = xs.Gamepad;
+    if ((g.wButtons & XINPUT_GAMEPAD_DPAD_UP) || g.sThumbLY > 16000) b |= P_UP;
+    if ((g.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) || g.sThumbLY < -16000) b |= P_DOWN;
+    if ((g.wButtons & XINPUT_GAMEPAD_DPAD_LEFT) || g.sThumbLX < -16000) b |= P_LEFT;
+    if ((g.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) || g.sThumbLX > 16000) b |= P_RIGHT;
+    if (g.wButtons & XINPUT_GAMEPAD_A) b |= P_ACCEPT;
+    if (g.wButtons & XINPUT_GAMEPAD_B) b |= P_BACK;
+    if (g.wButtons & XINPUT_GAMEPAD_X) b |= P_X;
+    if (g.wButtons & XINPUT_GAMEPAD_Y) b |= P_Y;
+    if (g.wButtons & XINPUT_GAMEPAD_START) b |= P_START;
+  }
   return b;
 }
 
-// ---- the dialog window ----
-enum { ID_LIST = 100, ID_TEXT, ID_DETAIL, ID_ACCEPT, ID_BACK, ID_EDIT, ID_KEY0 = 200 };
-// Text entry keyboard for controller use (the console's OSK is controller-driven).
-const wchar_t kKeys[] = L"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.!?'&@#() ";
-constexpr int kKeyCols = 12;
+// ---- the dialog in the game's picture ----
+// The on-screen keyboard (for the controller and the mouse; the keyboard types directly).
+const char16_t kKeys[] = u"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.!?'&@#() ";
+
 struct Dlg {
-  enum Kind { List, Question, Message, Text } kind = Message;
-  std::wstring heading, text;
-  std::vector<std::wstring> rows, details;
-  int focus = 0;
-  int result = -1;  // List: index or -1; Question: 1 yes / 0 no; Message: 0
+  ui::DialogView v;
+  int result = -1;  // List: index or -1; Question: 1 yes / 0 no; Text: 1 entered / 0 back; Message: 0
   bool done = false;
-  bool accept_focused = true;  // Question: which button has the focus
-  u32 pad_last = ~0u;           // buttons held when the dialog opened count as released only once
-  HWND wnd = nullptr, list = nullptr, detail = nullptr, accept = nullptr, back = nullptr, edit = nullptr;
-  HFONT font = nullptr;
-  std::wstring edit_text;  // Text: initial value in, entered value out
-  u32 max_chars = 0;
-  std::vector<HWND> keys;  // Text: the on-screen keyboard
-  int key = 0;             // Text: selected key
+  u32 pad_last = ~0u;  // controller buttons held when it opened count only after a release
+  u32 repeat_dir = 0;
+  Clock::time_point repeat_at;
+  bool mouse = false;  // the mouse was used last: its cursor shows
+  int last_click_row = -1;
+  Clock::time_point last_click;
 };
-std::atomic<HWND> g_open_wnd{nullptr};
+// The dialog on screen: shared by the waiting game thread, the window thread (input) and the
+// presenting thread (view).
+std::recursive_mutex g_dmu;
+std::condition_variable_any g_dcv;
+Dlg* g_dlg = nullptr;
 
 void finish(Dlg* d, int result) {
   d->result = result;
   d->done = true;
+  g_dcv.notify_all();
 }
 
-void update_detail(Dlg* d) {
-  if (!d->list || !d->detail) return;
-  int i = int(SendMessageW(d->list, LB_GETCURSEL, 0, 0));
-  SetWindowTextW(d->detail, i >= 0 && i < int(d->details.size()) ? d->details[i].c_str() : L"");
-}
+int rows_of(const Dlg* d) { return int(d->v.rows.size()); }
 
-void type_key(Dlg* d, wchar_t c) {
-  int n = GetWindowTextLengthW(d->edit);
-  if (u32(n) >= d->max_chars) return;
-  wchar_t s[2] = {c, 0};
-  SendMessageW(d->edit, EM_SETSEL, n, n);
-  SendMessageW(d->edit, EM_REPLACESEL, TRUE, LPARAM(s));
-}
-void backspace(Dlg* d) {
-  int n = GetWindowTextLengthW(d->edit);
+void list_move(Dlg* d, int delta) {
+  int n = rows_of(d);
   if (n <= 0) return;
-  SendMessageW(d->edit, EM_SETSEL, n - 1, n);
-  SendMessageW(d->edit, EM_REPLACESEL, TRUE, LPARAM(L""));
+  ui::DialogView& v = d->v;
+  v.focus = std::clamp(v.focus + delta, 0, n - 1);
+  if (v.focus < v.scroll) v.scroll = v.focus;
+  if (v.focus >= v.scroll + ui::kDialogListRows) v.scroll = v.focus - ui::kDialogListRows + 1;
+  v.scroll = std::clamp(v.scroll, 0, std::max(0, n - ui::kDialogListRows));
 }
 
-void accept_current(Dlg* d) {
-  if (d->kind == Dlg::Text) {
-    int n = GetWindowTextLengthW(d->edit);
-    std::wstring t(size_t(n) + 1, L'\0');
-    GetWindowTextW(d->edit, t.data(), n + 1);
-    t.resize(size_t(n));
-    d->edit_text = t;
-    finish(d, 1);
+void accept(Dlg* d) {
+  switch (d->v.kind) {
+    case ui::DialogView::List:
+      if (rows_of(d) > 0) finish(d, d->v.focus);
+      break;
+    case ui::DialogView::Question: finish(d, d->v.button == 1 ? 0 : 1); break;
+    case ui::DialogView::Text: finish(d, 1); break;
+    case ui::DialogView::Message: finish(d, 0); break;
+  }
+}
+void back(Dlg* d) { finish(d, d->v.kind == ui::DialogView::List ? -1 : 0); }
+
+// The initial text starts selected (as the console's keyboard shows it): the first character or
+// BACKSPACE replaces it.
+void type(Dlg* d, char16_t c) {
+  if (d->v.edit_selected) d->v.edit.clear();
+  d->v.edit_selected = false;
+  if (d->v.edit.size() < d->v.max_chars) d->v.edit.push_back(c);
+}
+void erase(Dlg* d) {
+  if (d->v.edit_selected) d->v.edit.clear();
+  d->v.edit_selected = false;
+  if (!d->v.edit.empty()) d->v.edit.pop_back();
+}
+
+// The on-screen keyboard's highlight moves (wrapping in its rows and columns).
+void key_move(Dlg* d, int dx, int dy) {
+  int n = int(d->v.keys.size()), cols = ui::kDialogKeyCols, rows = (n + cols - 1) / cols;
+  if (n <= 0) return;
+  if (d->v.key < 0) {
+    d->v.key = 0;
     return;
   }
-  if (d->kind == Dlg::List) {
-    int i = int(SendMessageW(d->list, LB_GETCURSEL, 0, 0));
-    if (i >= 0) finish(d, i);
-  } else if (d->kind == Dlg::Question) {
-    finish(d, d->accept_focused ? 1 : 0);
-  } else {
-    finish(d, 0);
+  int r = d->v.key / cols, c = d->v.key % cols;
+  c = (c + dx + cols) % cols;
+  r = (r + dy + rows) % rows;
+  d->v.key = std::min(r * cols + c, n - 1);
+}
+
+void use_keys(Dlg* d) {  // keys or a controller took over from the mouse
+  if (d->mouse) {
+    d->mouse = false;
+    gpu::window_refresh_cursor();
   }
 }
 
-LRESULT CALLBACK dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-  Dlg* d = reinterpret_cast<Dlg*>(GetWindowLongPtrW(h, GWLP_USERDATA));
-  switch (msg) {
-    case WM_COMMAND:
-      if (!d) break;
-      if (LOWORD(wp) == ID_ACCEPT || LOWORD(wp) == IDOK) {
-        if (d->kind == Dlg::Question) d->accept_focused = LOWORD(wp) == ID_ACCEPT || GetFocus() != d->back;
-        accept_current(d);
-      } else if (LOWORD(wp) == ID_BACK || LOWORD(wp) == IDCANCEL) {
-        finish(d, d->kind == Dlg::List ? -1 : 0);
-      } else if (LOWORD(wp) == ID_LIST && HIWORD(wp) == LBN_SELCHANGE) {
-        update_detail(d);
-      } else if (LOWORD(wp) == ID_LIST && HIWORD(wp) == LBN_DBLCLK) {
-        accept_current(d);
-      } else if (LOWORD(wp) >= ID_KEY0 && LOWORD(wp) < ID_KEY0 + int(std::size(kKeys)) - 1) {
-        type_key(d, kKeys[LOWORD(wp) - ID_KEY0]);
-      }
-      return 0;
-    case WM_TIMER: {
-      if (!d) break;
-      if (std::string ans; take_live(&ans)) {  // a live answer for the dialog already on screen
-        LOG_I("sysdlg", "open dialog: live answer '%s'", ans.c_str());
-        if (d->kind == Dlg::Text) {
-          if (ans.rfind("text:", 0) == 0) {
-            d->edit_text = widen(ans.substr(5)).substr(0, d->max_chars);
-            finish(d, 1);
-          } else {
-            finish(d, 0);
-          }
-        } else if (d->kind == Dlg::List) {
-          int r = -1;
-          if (ans.rfind("choose:text=", 0) == 0) {
-            std::wstring want = widen(ans.substr(12));
-            for (size_t i = 0; i < d->rows.size() && r < 0; ++i)
-              if ((d->rows[i] + L"\n" + d->details[i]).find(want) != std::wstring::npos) r = int(i);
-          } else if (ans.rfind("choose:", 0) == 0 && ans != "choose:cancel") {
-            r = std::atoi(ans.c_str() + 7);
-          }
-          finish(d, r >= 0 && r < int(d->rows.size()) ? r : -1);
-        } else if (d->kind == Dlg::Question) {
-          finish(d, ans == "yes" ? 1 : 0);
-        } else {
-          finish(d, 0);
-        }
-        return 0;
-      }
-      u32 now = pad_now(), edge = now & ~d->pad_last;
-      d->pad_last = now;
-      if (d->kind == Dlg::List && (edge & (P_UP | P_DOWN))) {
-        int n = int(SendMessageW(d->list, LB_GETCOUNT, 0, 0));
-        int i = int(SendMessageW(d->list, LB_GETCURSEL, 0, 0));
-        i = std::clamp(i + ((edge & P_DOWN) ? 1 : -1), 0, std::max(n - 1, 0));
-        SendMessageW(d->list, LB_SETCURSEL, WPARAM(i), 0);
-        update_detail(d);
-      }
-      if (d->kind == Dlg::Question && (edge & (P_LEFT | P_RIGHT))) {
-        d->accept_focused = (edge & P_LEFT) != 0;
-        SetFocus(d->accept_focused ? d->accept : d->back);
-      }
-      if (d->kind == Dlg::Text) {
-        int n = int(d->keys.size()), rows = (n + kKeyCols - 1) / kKeyCols;
-        int r = d->key / kKeyCols, c = d->key % kKeyCols;
-        if (edge & P_LEFT) c = (c + kKeyCols - 1) % kKeyCols;
-        if (edge & P_RIGHT) c = (c + 1) % kKeyCols;
-        if (edge & P_UP) r = (r + rows - 1) % rows;
-        if (edge & P_DOWN) r = (r + 1) % rows;
-        if (edge & (P_LEFT | P_RIGHT | P_UP | P_DOWN)) {
-          d->key = std::min(r * kKeyCols + c, n - 1);
-          SetFocus(d->keys[size_t(d->key)]);
-        }
-        if (edge & P_ACCEPT) type_key(d, kKeys[d->key]);
-        if (edge & P_X) backspace(d);
-        if (edge & P_Y) type_key(d, L' ');
-        if (edge & P_START) accept_current(d);
-        if (edge & P_BACK) finish(d, 0);
-        return 0;
-      }
-      if (edge & P_ACCEPT) accept_current(d);
-      if (edge & P_BACK) finish(d, d->kind == Dlg::List ? -1 : 0);
-      return 0;
-    }
-    case WM_CLOSE:
-      if (d) finish(d, d->kind == Dlg::List ? -1 : 0);
-      return 0;
-  }
-  return DefWindowProcW(h, msg, wp, lp);
-}
-
-// Runs on the window thread: builds the window, loops until answered.
-void run_dialog(Dlg* d) {
-  HWND owner = static_cast<HWND>(gpu::window_handle());
-  HINSTANCE inst = GetModuleHandleW(nullptr);
-  static bool registered = false;
-  if (!registered) {
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.lpfnWndProc = dlg_proc;
-    wc.hInstance = inst;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
-    wc.lpszClassName = L"ac4_sysdialog";
-    RegisterClassExW(&wc);
-    registered = true;
-  }
-  const int dpi = int(GetDpiForWindow(owner) ? GetDpiForWindow(owner) : 96);
-  auto S = [dpi](int v) { return MulDiv(v, dpi, 96); };  // sizes below are at 96 DPI
-  const int W = S(560), H = S(d->kind == Dlg::List ? 460 : d->kind == Dlg::Text ? 420 : 220);
-  RECT orc{};
-  GetWindowRect(owner, &orc);
-  RECT r{0, 0, W, H};
-  DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT;
-  AdjustWindowRectEx(&r, style, FALSE, ex);
-  int x = orc.left + ((orc.right - orc.left) - (r.right - r.left)) / 2, y = orc.top + ((orc.bottom - orc.top) - (r.bottom - r.top)) / 2;
-  d->wnd = CreateWindowExW(ex, L"ac4_sysdialog", d->heading.c_str(), style, x, y, r.right - r.left, r.bottom - r.top, owner, nullptr,
-                           inst, nullptr);
-  if (!d->wnd) {
-    finish(d, d->kind == Dlg::List ? -1 : 0);
-    return;
-  }
-  SetWindowLongPtrW(d->wnd, GWLP_USERDATA, LONG_PTR(d));
-  d->font = CreateFontW(-S(17), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-  auto child = [&](const wchar_t* cls, const wchar_t* text, DWORD st, int cx, int cy, int cw, int ch, int id) {
-    HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | st, cx, cy, cw, ch, d->wnd, HMENU(INT_PTR(id)), inst, nullptr);
-    SendMessageW(c, WM_SETFONT, WPARAM(d->font), TRUE);
-    return c;
-  };
-  const wchar_t* accept_label = d->kind == Dlg::Question ? L"Yes" : L"OK";
-  if (d->kind == Dlg::List) {
-    d->list = child(L"LISTBOX", L"", WS_BORDER | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, S(12), S(12), W - S(24), S(300), ID_LIST);
-    for (const auto& row : d->rows) SendMessageW(d->list, LB_ADDSTRING, 0, LPARAM(row.c_str()));
-    SendMessageW(d->list, LB_SETCURSEL, WPARAM(d->focus), 0);
-    d->detail = child(L"STATIC", L"", SS_LEFT, S(12), S(320), W - S(24), S(80), ID_DETAIL);
-    update_detail(d);
-    d->accept = child(L"BUTTON", accept_label, WS_TABSTOP | BS_DEFPUSHBUTTON, W - S(236), H - S(46), S(108), S(32), ID_ACCEPT);
-    d->back = child(L"BUTTON", L"Back", WS_TABSTOP | BS_PUSHBUTTON, W - S(120), H - S(46), S(108), S(32), ID_BACK);
-    SetFocus(d->list);
-  } else if (d->kind == Dlg::Text) {
-    child(L"STATIC", d->text.c_str(), SS_LEFT, S(16), S(16), W - S(32), S(90), ID_TEXT);
-    d->edit = child(L"EDIT", d->edit_text.c_str(), WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, S(16), S(116), W - S(32), S(30), ID_EDIT);
-    SendMessageW(d->edit, EM_SETLIMITTEXT, WPARAM(d->max_chars), 0);
-    SendMessageW(d->edit, EM_SETSEL, 0, -1);
-    const int n = int(std::size(kKeys)) - 1, kw = (W - S(32)) / kKeyCols;
-    for (int i = 0; i < n; ++i) {
-      wchar_t label[8] = {kKeys[i], 0};
-      if (kKeys[i] == L' ') wcscpy(label, L"Space");
-      d->keys.push_back(child(L"BUTTON", label, WS_TABSTOP | BS_PUSHBUTTON, S(16) + (i % kKeyCols) * kw, S(160) + (i / kKeyCols) * S(36), kw - S(4), S(32),
-                              ID_KEY0 + i));
-    }
-    child(L"STATIC", L"Controller: D-pad select, A type, X delete, Y space, Start OK, B back", SS_LEFT, S(16), H - S(84), W - S(32), S(22),
-          ID_TEXT);
-    d->accept = child(L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, W - S(236), H - S(46), S(108), S(32), ID_ACCEPT);
-    d->back = child(L"BUTTON", L"Back", WS_TABSTOP | BS_PUSHBUTTON, W - S(120), H - S(46), S(108), S(32), ID_BACK);
-    SetFocus(d->edit);
-  } else {
-    child(L"STATIC", d->text.c_str(), SS_LEFT, S(16), S(16), W - S(32), H - S(80), ID_TEXT);
-    d->accept = child(L"BUTTON", accept_label, WS_TABSTOP | BS_DEFPUSHBUTTON, W - (d->kind == Dlg::Question ? S(236) : S(120)), H - S(46), S(108), S(32),
-                      ID_ACCEPT);
-    if (d->kind == Dlg::Question) d->back = child(L"BUTTON", L"No", WS_TABSTOP | BS_PUSHBUTTON, W - S(120), H - S(46), S(108), S(32), ID_BACK);
-    SetFocus(d->accept);
-  }
-  d->pad_last = pad_now();
-  g_open_wnd = d->wnd;
-  SetTimer(d->wnd, 1, 30, nullptr);
-  EnableWindow(owner, FALSE);
-  ShowWindow(d->wnd, SW_SHOW);
-  SetForegroundWindow(d->wnd);
-  MSG m;
-  while (!d->done && GetMessageW(&m, nullptr, 0, 0) > 0) {
-    if (IsDialogMessageW(d->wnd, &m)) continue;
-    TranslateMessage(&m);
-    DispatchMessageW(&m);
-  }
-  KillTimer(d->wnd, 1);
-  g_open_wnd = nullptr;
-  EnableWindow(owner, TRUE);
-  DestroyWindow(d->wnd);
-  DeleteObject(d->font);
-  SetForegroundWindow(owner);
-}
-
-// Shows the dialog interactively; false if there is no window to show it on.
+// Shows the dialog in the game's picture and waits for the answer (the calling game thread).
 bool show(Dlg* d) {
   struct Hold {
     Hold() { g_active.fetch_add(1); }
     ~Hold() { g_active.fetch_sub(1); }
   } hold;
-  return gpu::run_on_window_thread([d] { run_dialog(d); });
+  if (!gpu::window_handle()) return false;
+  d->pad_last = pad_now();
+  const bool captured = gpu::window_mouse_captured();
+  if (captured) gpu::window_set_mouse_capture(false);  // the dialog takes the mouse
+  {
+    std::unique_lock lk(g_dmu);
+    g_dlg = d;
+    gpu::window_refresh_cursor();
+    g_dcv.wait(lk, [&] { return d->done; });
+    g_dlg = nullptr;
+  }
+  gpu::window_refresh_cursor();
+  if (captured) gpu::window_set_mouse_capture(true);
+  return true;
 }
 
 }  // namespace
 
 bool active() { return g_active.load() > 0; }
 
+bool shown() {
+  std::lock_guard lk(g_dmu);
+  return g_dlg != nullptr;
+}
+
+bool cursor_wanted() {
+  std::lock_guard lk(g_dmu);
+  return g_dlg && g_dlg->mouse;
+}
+
+bool view(ui::DialogView* out) {
+  std::lock_guard lk(g_dmu);
+  if (!g_dlg) return false;
+  *out = g_dlg->v;
+  return true;
+}
+
+void on_key(u32 vk, bool down, bool repeat) {
+  std::lock_guard lk(g_dmu);
+  Dlg* d = g_dlg;
+  if (!d || d->done || !down) return;
+  use_keys(d);
+  ui::DialogView& v = d->v;
+  if (vk == VK_ESCAPE) {
+    if (!repeat) back(d);  // a fresh press: a key held from the game's menu does not answer
+    return;
+  }
+  if (vk == VK_RETURN) {
+    if (!repeat) accept(d);
+    return;
+  }
+  switch (v.kind) {
+    case ui::DialogView::List:
+      if (vk == VK_UP) list_move(d, -1);
+      else if (vk == VK_DOWN) list_move(d, 1);
+      else if (vk == VK_PRIOR) list_move(d, -ui::kDialogListRows);
+      else if (vk == VK_NEXT) list_move(d, ui::kDialogListRows);
+      else if (vk == VK_HOME) list_move(d, -rows_of(d));
+      else if (vk == VK_END) list_move(d, rows_of(d));
+      break;
+    case ui::DialogView::Question:
+      if (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN || vk == VK_TAB) v.button = v.button == 0 ? 1 : 0;
+      break;
+    case ui::DialogView::Text:
+      if (vk == VK_BACK || vk == VK_DELETE) erase(d);
+      break;
+    case ui::DialogView::Message: break;
+  }
+}
+
+void on_char(u32 ch) {
+  std::lock_guard lk(g_dmu);
+  Dlg* d = g_dlg;
+  if (!d || d->done || d->v.kind != ui::DialogView::Text) return;
+  if (ch >= 0x20 && ch < 0x7f) type(d, char16_t(ch));  // printable ASCII (BACKSPACE, ENTER, ESC: on_key)
+}
+
+void on_mouse_move(int x, int y) {
+  std::lock_guard lk(g_dmu);
+  Dlg* d = g_dlg;
+  if (!d || d->done) return;
+  if (!d->mouse) {
+    d->mouse = true;
+    gpu::window_refresh_cursor();
+  }
+  ui::DialogHit h = ui::dialog_hit(d->v, x, y);
+  if (h.what == ui::DialogHit::Row) d->v.focus = h.index;
+  else if (h.what == ui::DialogHit::Button) d->v.button = h.index;
+  else if (h.what == ui::DialogHit::Key) d->v.key = h.index;
+}
+
+void on_mouse_button(int button, bool down, int x, int y) {
+  std::lock_guard lk(g_dmu);
+  Dlg* d = g_dlg;
+  if (!d || d->done || !down) return;  // presses answer (a release from the game's menu does not)
+  d->mouse = true;
+  if (button == 1) {
+    back(d);
+    return;
+  }
+  if (button != 0) return;
+  ui::DialogHit h = ui::dialog_hit(d->v, x, y);
+  auto now = Clock::now();
+  switch (h.what) {
+    case ui::DialogHit::Row:
+      d->v.focus = h.index;
+      if (h.index == d->last_click_row && now - d->last_click < std::chrono::milliseconds(GetDoubleClickTime())) accept(d);
+      d->last_click_row = h.index;
+      d->last_click = now;
+      break;
+    case ui::DialogHit::Button:
+      if (h.index == 0 || d->v.kind == ui::DialogView::Message) accept(d);
+      else back(d);
+      break;
+    case ui::DialogHit::Key:
+      d->v.key = h.index;
+      type(d, d->v.keys[size_t(h.index)]);
+      break;
+    case ui::DialogHit::None: break;
+  }
+}
+
+void on_wheel(int delta) {
+  std::lock_guard lk(g_dmu);
+  Dlg* d = g_dlg;
+  if (!d || d->done || d->v.kind != ui::DialogView::List) return;
+  static int rest = 0;
+  rest += delta;
+  int notches = rest / WHEEL_DELTA;
+  rest -= notches * WHEEL_DELTA;
+  if (notches) list_move(d, -notches);
+}
+
+void tick() {
+  std::lock_guard lk(g_dmu);
+  Dlg* d = g_dlg;
+  if (!d || d->done) return;
+  if (std::string ans; take_live(&ans)) {  // dev: a live answer for the dialog on screen
+    LOG_I("sysdlg", "open dialog: live answer '%s'", ans.c_str());
+    if (d->v.kind == ui::DialogView::Text) {
+      if (ans.rfind("text:", 0) == 0) {
+        d->v.edit = utf16(ans.substr(5)).substr(0, d->v.max_chars);
+        finish(d, 1);
+      } else {
+        finish(d, 0);
+      }
+    } else if (d->v.kind == ui::DialogView::List) {
+      int r = -1;
+      if (ans.rfind("choose:text=", 0) == 0) {
+        std::string want = ans.substr(12);
+        for (size_t i = 0; i < d->v.rows.size() && r < 0; ++i)
+          if ((d->v.rows[i] + "\n" + d->v.details[i]).find(want) != std::string::npos) r = int(i);
+      } else if (ans.rfind("choose:", 0) == 0 && ans != "choose:cancel") {
+        r = std::atoi(ans.c_str() + 7);
+      }
+      finish(d, r >= 0 && r < rows_of(d) ? r : -1);
+    } else if (d->v.kind == ui::DialogView::Question) {
+      finish(d, ans == "yes" ? 1 : 0);
+    } else {
+      finish(d, 0);
+    }
+    return;
+  }
+  u32 now = pad_now(), edge = now & ~d->pad_last;
+  d->pad_last = now;
+  // Directions repeat while held (as in PC SETTINGS).
+  u32 dir = now & kDirections;
+  bool fire = false;
+  auto t = Clock::now();
+  if (dir && ((edge & kDirections) || dir != d->repeat_dir)) {
+    fire = true;
+    d->repeat_at = t + std::chrono::milliseconds(380);
+  } else if (dir && t >= d->repeat_at) {
+    fire = true;
+    d->repeat_at = t + std::chrono::milliseconds(90);
+  }
+  d->repeat_dir = dir;
+  if (fire || (edge & ~kDirections)) use_keys(d);
+  ui::DialogView& v = d->v;
+  if (fire) {
+    if (v.kind == ui::DialogView::List) list_move(d, (dir & P_UP) ? -1 : (dir & P_DOWN) ? 1 : 0);
+    else if (v.kind == ui::DialogView::Question && (dir & (P_LEFT | P_RIGHT))) v.button = (dir & P_LEFT) ? 0 : 1;
+    else if (v.kind == ui::DialogView::Text)
+      key_move(d, (dir & P_LEFT) ? -1 : (dir & P_RIGHT) ? 1 : 0, (dir & P_UP) ? -1 : (dir & P_DOWN) ? 1 : 0);
+  }
+  if (v.kind == ui::DialogView::Text) {
+    if (edge & P_ACCEPT) {
+      if (v.key < 0) v.key = 0;
+      type(d, v.keys[size_t(v.key)]);
+    }
+    if (edge & P_X) erase(d);
+    if (edge & P_Y) type(d, u' ');
+    if (edge & P_START) accept(d);
+    if (edge & P_BACK) back(d);
+    return;
+  }
+  if (edge & P_ACCEPT) accept(d);
+  else if (edge & P_BACK) back(d);
+}
+
 void abort() {
-  if (HWND w = g_open_wnd.load()) PostMessageW(w, WM_CLOSE, 0, 0);
+  std::lock_guard lk(g_dmu);
+  if (g_dlg && !g_dlg->done) back(g_dlg);
 }
 
 bool text_input(const std::string& prompt, const std::u16string& initial, u32 max_chars, std::u16string* out) {
@@ -343,20 +385,22 @@ bool text_input(const std::string& prompt, const std::u16string& initial, u32 ma
   if (scripted(&ans)) {
     bool ok = ans.rfind("text:", 0) == 0;
     if (ok) {
-      std::string t = ans.substr(5);
-      std::wstring w = widen(t);
-      out->assign(w.begin(), w.end());
+      *out = utf16(ans.substr(5));
       if (out->size() > max_chars) out->resize(max_chars);
     }
     LOG_I("sysdlg", "text input '%s': scripted answer '%s'", prompt.c_str(), ans.c_str());
     return ok;
   }
   Dlg d;
-  d.kind = Dlg::Text;
-  d.heading = L"Text Input";
-  d.text = widen(prompt);
-  d.edit_text.assign(initial.begin(), initial.end());
-  d.max_chars = max_chars;
+  d.v.kind = ui::DialogView::Text;
+  d.v.heading = "TEXT INPUT";
+  d.v.text = prompt;
+  d.v.edit = initial.substr(0, max_chars);
+  d.v.edit_selected = !d.v.edit.empty();
+  d.v.max_chars = max_chars;
+  d.v.keys = kKeys;
+  d.v.button = -1;
+  LOG_I("sysdlg", "text input '%s' shown", prompt.c_str());
   if (!show(&d)) {
     LOG_W("sysdlg", "text input '%s': no window to show it; answered as back", prompt.c_str());
     return false;
@@ -365,7 +409,7 @@ bool text_input(const std::string& prompt, const std::u16string& initial, u32 ma
     LOG_I("sysdlg", "text input '%s': user backed out", prompt.c_str());
     return false;
   }
-  out->assign(d.edit_text.begin(), d.edit_text.end());
+  *out = d.v.edit;
   LOG_I("sysdlg", "text input '%s': %zu character(s) entered", prompt.c_str(), out->size());
   return true;
 }
@@ -393,16 +437,17 @@ int choose(const std::string& heading, const std::vector<ListItem>& items, int f
     return r;
   }
   Dlg d;
-  d.kind = Dlg::List;
-  d.heading = widen(heading);
+  d.v.kind = ui::DialogView::List;
+  for (char c : heading) d.v.heading += char(std::toupper(static_cast<unsigned char>(c)));  // as the game's own headings
   for (const ListItem& it : items) {
-    std::string row = it.title;
-    if (!it.subtitle.empty()) row += "  -  " + it.subtitle;
-    if (it.mtime) row += "    " + date_text(it.mtime);
-    d.rows.push_back(widen(row));
-    d.details.push_back(widen(it.detail));
+    d.v.rows.push_back(it.subtitle.empty() ? it.title : it.title + "  -  " + it.subtitle);
+    d.v.dates.push_back(date_text(it.mtime));
+    d.v.details.push_back(it.detail);
   }
-  d.focus = std::clamp(focus, 0, std::max(int(items.size()) - 1, 0));
+  d.v.focus = 0;
+  list_move(&d, std::clamp(focus, 0, std::max(int(items.size()) - 1, 0)));
+  d.v.button = -1;
+  LOG_I("sysdlg", "list '%s' shown (%zu item(s))", heading.c_str(), items.size());
   if (!show(&d)) {
     LOG_W("sysdlg", "list '%s': no window to show it; answered as back", heading.c_str());
     return -1;
@@ -419,9 +464,11 @@ bool confirm(const std::string& text) {
     return ans == "yes";
   }
   Dlg d;
-  d.kind = Dlg::Question;
-  d.heading = L"Saved Data Utility";
-  d.text = widen(text);
+  d.v.kind = ui::DialogView::Question;
+  d.v.heading = "SAVED DATA UTILITY";
+  d.v.text = text;
+  d.v.button = 0;  // YES
+  LOG_I("sysdlg", "question '%s' shown", text.c_str());
   if (!show(&d)) {
     LOG_W("sysdlg", "question '%s': no window to show it; answered no", text.c_str());
     return false;
@@ -438,9 +485,11 @@ void message(const std::string& text) {
     return;
   }
   Dlg d;
-  d.kind = Dlg::Message;
-  d.heading = L"Saved Data Utility";
-  d.text = widen(text);
+  d.v.kind = ui::DialogView::Message;
+  d.v.heading = "SAVED DATA UTILITY";
+  d.v.text = text;
+  d.v.button = 0;
+  LOG_I("sysdlg", "message '%s' shown", text.c_str());
   if (!show(&d)) LOG_W("sysdlg", "message '%s': no window to show it", text.c_str());
   else LOG_I("sysdlg", "message '%s' acknowledged", text.c_str());
 }
