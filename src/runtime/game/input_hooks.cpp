@@ -11,7 +11,6 @@
 #include "ppu/ppu_recomp.h"
 #include "runtime/bindings.h"
 #include "runtime/datawatch.h"
-#include "runtime/game/game_input.h"
 #include "runtime/input.h"
 #include "runtime/log.h"
 #include "runtime/memory.h"
@@ -200,27 +199,3 @@ void hook_look_update(Ctx& ctx, void (*orig)(Ctx&)) {
 
 }  // namespace ppu
 
-namespace rt::game {
-
-void axes_dump() {
-  LOG_I("input", "mouse look: %llu player turn commands, %llu pitch commands seen; state 0x%08x", (unsigned long long)ppu::g_turn_calls.load(),
-        (unsigned long long)ppu::g_pitch_calls.load(), ppu::g_player_state.load());
-  if (u32 state = ppu::g_player_state.load(); state && vm::committed(state, 64))
-    LOG_I("input", "  view state: turn %g, pitch %g", double(ppu::f32_of_bits(ppu::r32(state + 32))),
-          double(ppu::f32_of_bits(ppu::r32(state + 48))));
-  if (u32 look = ppu::g_look.load(); look && vm::committed(look + ppu::kPitchState, 40)) {
-    u32 p = look + ppu::kPitchState;
-    auto f = [&](u32 off) { return double(ppu::f32_of_bits(ppu::r32(p + off))); };
-    LOG_I("input", "  look pitch 0x%08x: angle %g, velocity %g, mode %u, max speed %g, drag %g, limits %g .. %g", p, f(0), f(4),
-          ppu::r32(p + 20), f(24), f(28), f(36), f(32));
-  }
-}
-
-void turn_trace(int) { LOG_W("input", "turntrace: not available for this title yet"); }
-
-bool axis_command(const std::string&) {
-  LOG_W("input", "axis: not available for this title yet");
-  return true;
-}
-
-}  // namespace rt::game
