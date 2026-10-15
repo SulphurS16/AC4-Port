@@ -94,10 +94,12 @@ struct Event {
 };
 std::mutex g_mu;
 std::deque<Event> g_events;
-// Presses made for the mouse: active from `at` for 70 ms (two game frames at least).
+// Presses made for the mouse: active from `at` for 70 ms (two game frames at least); screen_only:
+// dropped once a menu or gameplay has the input (cross_after_start).
 struct Press {
   u16 d1, d2;
   s64 at;
+  bool screen_only = false;
 };
 std::deque<Press> g_presses;
 std::atomic<u16> g_hold{0};  // a direction held for a slider far from the cursor's value
@@ -332,10 +334,15 @@ u32 object_at(Ctx& ctx, u32 dialog, float gx, float gy, u32* slider = nullptr) {
   return best;
 }
 
-void press(u16 d1, u16 d2, s64 at) {
+void press(u16 d1, u16 d2, s64 at, bool screen_only = false) {
   std::lock_guard lk(g_mu);
-  g_presses.push_back({d1, d2, at});
+  g_presses.push_back({d1, d2, at, screen_only});
 }
+}  // namespace
+
+void cross_after_start() { press(0, kCross, now_ms() + 200, true); }
+
+namespace {
 
 // The dragged slider follows the cursor: the D-pad held toward the target while it is ten steps
 // away or more (the game speeds up a held key), single presses nearer; done within half a step.
@@ -402,9 +409,14 @@ void frame(Ctx& ctx) {
     std::lock_guard lk(g_mu);
     events.swap(g_events);
   }
-  if (c == InputContext::Screen) {  // title, movies: a click is Start
+  // Screens without a menu (title, movies, the mission report): a click is Start, then Cross as
+  // the menu's confirm keys (cross_after_start).
+  if (c == InputContext::Screen) {
     for (const Event& e : events)
-      if (e.kind == Event::LeftDown) press(kStart, 0, now_ms());
+      if (e.kind == Event::LeftDown) {
+        press(kStart, 0, now_ms());
+        if (!movie_playing()) cross_after_start();
+      }
     g_last_dialog = dialog;
     return;
   }
@@ -524,9 +536,10 @@ void menu_pad_bits(u16* d1, u16* d2) {
   s64 t = now_ms();
   *d1 |= g_hold.load(std::memory_order_relaxed);
   std::lock_guard lk(g_mu);
-  while (!g_presses.empty() && g_presses.front().at + 70 <= t) g_presses.pop_front();
+  g_presses.erase(std::remove_if(g_presses.begin(), g_presses.end(), [&](const Press& p) { return p.at + 70 <= t; }), g_presses.end());
+  const bool screen = g_context.load(std::memory_order_relaxed) == int(InputContext::Screen);
   for (const Press& p : g_presses) {
-    if (p.at > t) continue;
+    if (p.at > t || (p.screen_only && !screen)) continue;
     *d1 |= p.d1;
     *d2 |= p.d2;
   }

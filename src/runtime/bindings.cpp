@@ -14,6 +14,7 @@
 
 #include "common/ini.h"
 #include "common/settings_file.h"
+#include "runtime/game/frame_policy.h"
 #include "runtime/game/menu_mouse.h"
 #include "runtime/input.h"
 #include "runtime/log.h"
@@ -225,15 +226,26 @@ PadOut sample() {
   bool neg[4] = {}, pos[4] = {};
   std::lock_guard lk(g_mu);
   // In the game's menus an input listed in [menu] drives its menu control only; on other screens
-  // than gameplay (title, movies) the menu's confirm and back keys press Start as well. An input
-  // keeps the meaning it had when it went down until it is released: Escape closing the pause menu
-  // (Circle there) does not become Start once gameplay resumes under the still pressed key.
+  // than gameplay (title, movies, the mission report) the menu's confirm and back keys press Start,
+  // the confirm keys then Cross unless a menu opened (game::cross_after_start). An input keeps the
+  // meaning it had when it went down until it is released: Escape closing the pause menu (Circle
+  // there) does not become Start once gameplay resumes under the still pressed key.
+  auto in_menu = [&](u16 bit, u32 code) {
+    for (size_t c = 0; c < kControlCount; ++c)
+      if (kControls[c].kind == Kind::D2 && kControls[c].bit == bit && std::find(g_menu[c].begin(), g_menu[c].end(), code) != g_menu[c].end())
+        return true;
+    return false;
+  };
+  auto confirm_or_back = [&](u32 code) { return in_menu(CROSS, code) || in_menu(CIRCLE, code); };
   const game::InputContext where = game::input_context();
   static std::vector<std::pair<u32, game::InputContext>> held;  // inputs down, with their context at the press
   auto context_of = [&](u32 code) {
     for (auto& [c, at] : held)
       if (c == code) return at;
     held.push_back({code, where});
+    // Start with Cross at once would open the title's menu and choose its first entry in the same
+    // moment (LOAD GAME: straight to the save list); Cross comes later, when no menu opened.
+    if (where == game::InputContext::Screen && in_menu(CROSS, code) && !game::movie_playing()) game::cross_after_start();
     return where;
   };
   held.erase(std::remove_if(held.begin(), held.end(), [&](const auto& h) { return !down(h.first); }), held.end());
@@ -246,6 +258,7 @@ PadOut sample() {
   auto drives = [&](u32 code, size_t c) {
     game::InputContext at = context_of(code);
     bool game = std::find(g_bind[c].begin(), g_bind[c].end(), code) != g_bind[c].end();
+    if (at == game::InputContext::Screen) return game && !confirm_or_back(code);  // Start (below)
     if (at != game::InputContext::Menu) return game;
     return std::find(g_menu[c].begin(), g_menu[c].end(), code) != g_menu[c].end() || (game && !in_menu_layer(code));
   };
@@ -254,7 +267,7 @@ PadOut sample() {
     bool on = false;
     for (u32 code : g_bind[c]) on = on || (down(code) && drives(code, c));
     for (u32 code : g_menu[c]) on = on || (down(code) && drives(code, c));
-    // Screens without a menu (title, movies): the menu's confirm and back keys press Start.
+    // Screens without a menu (title, movies, the report): the menu's confirm and back keys press Start.
     if (k.kind == Kind::D2 && (k.bit == CROSS || k.bit == CIRCLE))
       for (u32 code : g_menu[c])
         if (down(code) && context_of(code) == game::InputContext::Screen) o.d1 |= START;

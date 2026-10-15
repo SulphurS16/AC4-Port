@@ -11,5 +11,7 @@ void thread_exited(const std::string& name);
 // Gameplay runs: the AC's fire control thread inside a sortie scene (missions, tutorial, AC TEST,
 // arena; frame_policy.cpp).
 bool mission_running();
+// A movie plays: the system movie player runs (also behind the title screen; frame_policy.cpp).
+bool movie_playing();
 
 }  // namespace rt::game

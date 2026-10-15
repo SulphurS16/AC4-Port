@@ -18,6 +18,11 @@ namespace {
 std::mutex g_mu;
 int g_fcs = 0, g_sorties = 0;
 std::atomic<bool> g_gameplay{false};
+// The system movie player's control thread (cellSail, one per playing movie: the opening, the
+// title's background, briefings, chapter movies, the staff roll).
+constexpr const char* kMoviePlayer = "_libsail-control";
+int g_movies = 0;
+std::atomic<bool> g_movie{false};
 
 bool is_sortie(const std::string& name) {
   constexpr const char* kSuffix = "SortieScene";
@@ -35,9 +40,13 @@ void update() {
 }  // namespace
 
 bool mission_running() { return g_gameplay.load(std::memory_order_relaxed); }
+bool movie_playing() { return g_movie.load(std::memory_order_relaxed); }
 
 void thread_started(const std::string& name) {
-  if (name == "FcsManager" || is_sortie(name)) {
+  if (name == kMoviePlayer) {
+    std::lock_guard lk(g_mu);
+    g_movie = ++g_movies > 0;
+  } else if (name == "FcsManager" || is_sortie(name)) {
     std::lock_guard lk(g_mu);
     (name == "FcsManager" ? g_fcs : g_sorties)++;
     update();
@@ -45,7 +54,11 @@ void thread_started(const std::string& name) {
 }
 
 void thread_exited(const std::string& name) {
-  if (name == "FcsManager" || is_sortie(name)) {
+  if (name == kMoviePlayer) {
+    std::lock_guard lk(g_mu);
+    if (g_movies > 0) --g_movies;
+    g_movie = g_movies > 0;
+  } else if (name == "FcsManager" || is_sortie(name)) {
     std::lock_guard lk(g_mu);
     int& n = name == "FcsManager" ? g_fcs : g_sorties;
     if (n > 0) --n;

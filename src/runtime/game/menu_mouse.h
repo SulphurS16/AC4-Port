@@ -7,9 +7,15 @@ namespace rt::game {
 // What the player's input drives right now (bindings.h chooses keys by it):
 //   Menu:     a menu dialog with a focused item takes the keys (menu keys, cursor, clicks)
 //   Gameplay: a mission runs and no menu is open
-//   Screen:   anything else (title, movies, loading): Enter, Space, Escape and a click press Start
+//   Screen:   anything else (title, movies, loading, the mission report): Enter, Space, Escape and
+//             a click press Start (and Enter, Space and a click then Cross: cross_after_start)
 enum class InputContext { Gameplay, Menu, Screen };
 InputContext input_context();
+
+// A Start press of the menu's confirm key or a click on a screen without a menu: Cross follows
+// 200 ms later unless a menu opened by then (the title's menu: it would take the Cross as its
+// choice, LOAD GAME). The mission report continues on Cross only. Not while a movie plays.
+void cross_after_start();
 
 // Window thread: mouse activity over the client area (client pixels) while the mouse is free.
 void menu_mouse_moved();
