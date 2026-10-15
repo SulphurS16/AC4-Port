@@ -107,7 +107,13 @@ const char* const kMenuDefaults =
     "left = Left, A\n"
     "right = Right, D\n"
     "l1 = Q\n"
-    "r1 = E\n";
+    "r1 = E\n"
+    "# The other buttons the game's menus use (GARAGE in the hub, FULL / SORT in SCHEMATICS, ...); keys\n"
+    "# not listed in this section keep their mission meaning in menus (Shift R2, Ctrl L3, C R3)\n"
+    "triangle = R\n"
+    "square = F\n"
+    "l2 = Z\n"
+    "select = X\n";
 
 bool truthy(const std::string& v) { return v == "1" || v == "true" || v == "yes" || v == "on"; }
 

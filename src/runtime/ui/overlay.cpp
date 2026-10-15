@@ -82,7 +82,8 @@ const ControlText kMenuText[] = {
     {"up", "UP", "D-PAD UP"},           {"down", "DOWN", "D-PAD DOWN"},        {"left", "LEFT", "D-PAD LEFT"},
     {"right", "RIGHT", "D-PAD RIGHT"},  {"cross", "CHOOSE", "CROSS"},          {"circle", "BACK", "CIRCLE"},
     {"start", "START / KEY GUIDE", "START"}, {"l1", "PREVIOUS PAGE", "L1"},    {"r1", "NEXT PAGE", "R1"},
-    {"triangle", "TRIANGLE BUTTON", "TRIANGLE"}, {"square", "SQUARE BUTTON", "SQUARE"}, {"select", "SELECT BUTTON", "SELECT"},
+    {"triangle", "TRIANGLE BUTTON", "TRIANGLE"}, {"square", "SQUARE BUTTON", "SQUARE"}, {"l2", "L2 BUTTON", "L2"},
+    {"select", "SELECT BUTTON", "SELECT"},
 };
 const ControlText* menu_text(size_t c) {
   std::string name = bindings::control_name(c);
