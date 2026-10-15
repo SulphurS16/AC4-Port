@@ -199,16 +199,17 @@ bool Setup::ready(const SetupConfig& c) {
 }
 
 unsigned long long Setup::space_needed(const SetupConfig& c) {
-  // Measured on the development PC: tools 0.92 GB (+0.25 GB of archives while unpacking), prepared
-  // files 0.16, generated code 0.16, build 0.45, the game's system cache 1.2, shaders and SPU code
-  // 0.03, saves under 0.01.
+  // Measured on the development PC (2026-10-15): tools 0.92 GB (+0.25 GB of archives while
+  // unpacking), prepared files 0.07, generated code 0.13, build 0.50, shaders and SPU code 0.01,
+  // saves under 0.01; the game's system cache (cleared at each start, filled while playing) holds
+  // copies of its bind\ archives: at most their 1.74 GB.
   const double gb = 1024.0 * 1024 * 1024;
   double need = 0;
   if (!is_dir(tools_dir(c) / "cmake-4.4.3-windows-x86_64")) need += 1.2;
-  if (!is_file(prepared(c) / "eboot.elf")) need += 0.2;
+  if (!is_file(prepared(c) / "eboot.elf")) need += 0.1;
   if (!is_file(gen_dir(c) / "ppu" / "ppu_functab.cpp")) need += 0.2;
   if (!is_file(game_exe(c))) need += 0.5;
-  if (!is_dir(c.data / "hdd1" / "model")) need += 1.3;
+  need += 1.8;  // the system cache (emptied at every start)
   return (unsigned long long)(need * gb);
 }
 
