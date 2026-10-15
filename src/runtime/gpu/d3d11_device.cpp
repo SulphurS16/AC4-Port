@@ -34,6 +34,7 @@ u32 g_ui_w = 0, g_ui_h = 0;
 // Exclusive fullscreen: requested by any thread, carried out on the presenting thread.
 std::atomic<int> g_excl_request{-1};  // -1 none, 0 leave, 1 enter
 std::atomic<u32> g_excl_w{0}, g_excl_h{0}, g_excl_hz{0};
+std::atomic<u32> g_mode_w{0}, g_mode_h{0};  // the display mode exclusive fullscreen runs in
 std::atomic<bool> g_exclusive{false};
 bool g_excl_wanted = false;  // presenting thread: the mode is fullscreen (re-entered after Alt+Tab)
 std::chrono::steady_clock::time_point g_excl_retry;
@@ -206,11 +207,21 @@ void report_failure(const char* what, HRESULT hr) {
 }
 
 // The swap chain follows the window's client size (resizing, borderless fullscreen), checked
-// before each present on the presenting thread.
+// before each present on the presenting thread; in exclusive fullscreen it has the display mode's
+// size (the window's client area passes through other sizes while DXGI switches the mode).
 void resize_to_window() {
   RECT rc{};
   if (!g_hwnd || !GetClientRect(g_hwnd, &rc) || rc.right <= 0 || rc.bottom <= 0) return;  // minimized: keep the buffers
   u32 w = u32(rc.right), h = u32(rc.bottom);
+  if (g_exclusive.load() && g_mode_w.load() && g_mode_h.load()) {
+    static u32 noted_w = 0, noted_h = 0;
+    if ((w != g_mode_w || h != g_mode_h) && (w != noted_w || h != noted_h)) {
+      noted_w = w, noted_h = h;
+      LOG_I("gpu", "exclusive fullscreen: the window's client area is %ux%u, the display mode %ux%u", w, h, g_mode_w.load(),
+            g_mode_h.load());
+    }
+    w = g_mode_w, h = g_mode_h;
+  }
   if (w == g_dev.width && h == g_dev.height) return;
   g_dev.ctx->OMSetRenderTargets(0, nullptr, nullptr);
   if (g_dev.backbuffer_rtv) g_dev.backbuffer_rtv->Release();
@@ -258,6 +269,8 @@ void enter_exclusive() {
   }
   mode.RefreshRate = DXGI_RATIONAL{0, 0};  // as DXGI recommends after the switch
   g_dev.swap->ResizeTarget(&mode);
+  g_mode_w = mode.Width;
+  g_mode_h = mode.Height;
   g_exclusive = true;
   display::set_exclusive(true);
   LOG_I("gpu", "exclusive fullscreen %ux%u at %.2f Hz", mode.Width, mode.Height,
@@ -301,6 +314,12 @@ void request_exclusive(bool on, u32 w, u32 h, u32 hz) {
   g_excl_request = on ? 1 : 0;
 }
 bool exclusive_active() { return g_exclusive.load(); }
+bool exclusive_mode_size(int* w, int* h) {
+  if (!g_exclusive.load() || !g_mode_w.load() || !g_mode_h.load()) return false;
+  *w = int(g_mode_w.load());
+  *h = int(g_mode_h.load());
+  return true;
+}
 
 void present_texture(ID3D11ShaderResourceView* srv, u32 src_w, u32 src_h) {
   auto* c = g_dev.ctx;

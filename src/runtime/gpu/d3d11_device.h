@@ -34,6 +34,8 @@ void present_texture(ID3D11ShaderResourceView* srv, u32 src_w, u32 src_h);
 // re-entered when the window is in front again after DXGI left it (Alt+Tab).
 void request_exclusive(bool on, u32 w = 0, u32 h = 0, u32 hz = 0);
 bool exclusive_active();
+// The display mode while exclusive fullscreen is active (the window's client area may differ).
+bool exclusive_mode_size(int* w, int* h);
 // Copies the last presented frame to CPU memory (RGBA8) for captures (waits for the GPU).
 bool read_back_last_frame(std::vector<u8>& rgba, u32& w, u32& h);
 // Captures without stalling the frame: begin_capture copies the last presented frame into a

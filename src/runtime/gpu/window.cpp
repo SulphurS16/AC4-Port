@@ -511,6 +511,7 @@ void window_set_client_size(int w, int h) {
   run_on_window_thread([w, h] { set_client_size(w, h); });
 }
 void window_client_size(int* w, int* h) {
+  if (exclusive_mode_size(w, h)) return;  // what is on screen: the display mode (the client area can be larger)
   RECT rc{};
   if (g_hwnd) GetClientRect(g_hwnd, &rc);
   *w = rc.right;
