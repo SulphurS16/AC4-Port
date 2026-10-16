@@ -1089,6 +1089,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
   wchar_t self[MAX_PATH * 4];
   GetModuleFileNameW(nullptr, self, DWORD(std::size(self)));
   fs::path exe_dir = fs::path(self).parent_path();
+  // Started from inside the release zip, Windows runs a copy in a temporary folder: the install
+  // folder and the launcher's record would be made there and lost.
+  wchar_t temp[MAX_PATH + 1];
+  if (g_embedded && GetTempPathW(DWORD(std::size(temp)), temp) && inside(exe_dir, temp)) {
+    MessageBoxW(nullptr,
+                L"AC4-Launcher.exe was started from inside the zip (Windows runs it from a temporary folder).\n\n"
+                L"Unzip AC4-Port first: right-click the zip, Extract All..., choose a folder of your own, then start "
+                L"AC4-Launcher.exe from there.",
+                kTitle, MB_ICONINFORMATION);
+    return 1;
+  }
   g_ini_path = (writable(exe_dir) ? exe_dir : local_appdata()) / "launcher.ini";
   load_paths();
   // The install folder: the port's (or, for a release launcher, the launcher's) folder's "local"
