@@ -1,11 +1,13 @@
 // AC4-Launcher: the player's way in. Takes the game's folder and the folder with the files the
 // player decrypted (checked by SHA-256; the port decrypts nothing), or prepares those files with
-// the player's own RPCS3 in one step (rpcs3.h: a private copy of RPCS3 does it), runs the first-time setup
-// (setup.h), offers the display mode, resolution and frame rate (the shared settings file, also
-// changed in game under SYSTEM > PC SETTINGS) and starts the game. The More menu holds the rest:
-// render scale, monitor, presets, saves (open, back up, restore), safe mode, settings reset, the
-// install folder, rebuild and the log. Settings and saves are the player's own: they live in
-// Saved Games\ARMORED CORE 4, the install folder holds the rest.
+// the player's own RPCS3 in one step (rpcs3.h: a private copy of RPCS3 does it), proposes a good
+// place for the game data, runs the first-time setup (setup.h), offers shortcuts, the display mode,
+// resolution and frame rate (the shared settings file, also changed in game under SYSTEM > PC
+// SETTINGS) and starts the game. A newer launcher extracted into another folder finds the earlier
+// install (install.h) and only rebuilds what changed. The More menu holds the rest: render scale,
+// monitor, presets, saves (open, back up, restore), safe mode, settings reset, rebuild, the log,
+// shortcuts and removing the game data. Settings and saves are the player's own: they live in
+// Saved Games\ARMORED CORE 4, the game data folder holds the rest.
 // Contains no game data or game-derived code.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -19,6 +21,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -27,6 +30,7 @@
 #include "common/ini.h"
 #include "common/settings_file.h"
 #include "launcher/inputs.h"
+#include "launcher/install.h"
 #include "launcher/process.h"
 #include "launcher/rpcs3.h"
 #include "launcher/setup.h"
@@ -41,13 +45,14 @@ using namespace launcher;
 
 namespace {
 
-constexpr UINT WM_SETUP = WM_APP + 1, WM_CHECKED = WM_APP + 2, WM_GAME_EXIT = WM_APP + 3, WM_PREP = WM_APP + 4;
+constexpr UINT WM_SETUP = WM_APP + 1, WM_CHECKED = WM_APP + 2, WM_GAME_EXIT = WM_APP + 3, WM_PREP = WM_APP + 4, WM_STARTUP = WM_APP + 5,
+               WM_DATASIZE = WM_APP + 6, WM_REMOVED = WM_APP + 7;
 constexpr const wchar_t* kTitle = L"ARMORED CORE 4";
 constexpr const wchar_t* kSavePrefix = L"BLUS30027";  // the game's save folders
 enum Id {
-  kDiscEdit = 100, kFilesEdit,
-  kDiscBrowse = 110, kFilesBrowse, kPrepFiles,
-  kDiscState = 120, kFilesState,
+  kDiscEdit = 100, kFilesEdit, kDataEdit,
+  kDiscBrowse = 110, kFilesBrowse, kPrepFiles, kDataBrowse,
+  kDiscState = 120, kFilesState, kDataState,
   kPrepare = 140, kCancel, kProgress = 143, kStatus,
   kFps = 150, kMode, kResolution,
   kMore = 160,
@@ -59,7 +64,13 @@ enum Id {
   kMenuPreset = 340,   // + index into kPresets
   kMenuSavesOpen = 360, kMenuSavesBackup, kMenuSavesRestore,
   kMenuSafePlay = 370, kMenuResetSettings,
-  kMenuInstall = 380, kMenuRebuild, kMenuOpenLog, kMenuWhichFiles,
+  kMenuRebuild = 381, kMenuOpenLog, kMenuWhichFiles, kMenuShortcuts, kMenuRemove,
+};
+// The buttons of the launcher's questions (task dialogs; tools/test/launcher_drive.py presses them by these ids).
+enum Answer {
+  kUseIt = 1001, kMoveIt, kNewInstall,               // an earlier install
+  kPlaceAppData = 1101, kPlacePick, kPlaceKeep, kPlaceMove,  // the place of the game data
+  kRemoveNow = 1201, kShowFolder, kCloseNow,          // removing the game data
 };
 
 HINSTANCE g_inst;
@@ -68,21 +79,28 @@ HFONT g_font = nullptr, g_big = nullptr;
 UINT g_dpi = 96;
 int S(int v) { return MulDiv(v, int(g_dpi), 96); }
 
-fs::path g_src, g_ini_path;
+fs::path g_src, g_ini_path, g_self;
 bool g_embedded = false;  // a release launcher: the port's sources come from inside it (source.h)
 fs::path g_user_override;  // launcher.ini [paths] user
+fs::path g_place_ok;       // launcher.ini [paths] place_ok: the player keeps the game data in this folder despite its risk
+bool g_offer_pending = false;  // a new copy of the launcher: an earlier install may be offered (launcher.ini waits for the answer)
 SetupConfig g_cfg;
 Setup g_setup;
 Rpcs3Prep g_prep;
 fs::path g_rpcs3, g_pup;  // the player's rpcs3.exe and PS3UPDAT.PUP (Prepare files)
 HANDLE g_game = nullptr;
 bool g_ready = false;
+bool g_removing = false;
+bool g_setup_reported = false;  // the finished setup was handled (its last notifications arrive more than once)
 std::wstring g_note;  // a message for the status line (a setup or game error) until the next action
 
 std::mutex g_check_mu;
 Status g_disc_check, g_files_check;
 bool g_checked = false;
 std::atomic<int> g_check_gen{0};
+std::atomic<int> g_size_gen{0};
+unsigned long long g_data_bytes = 0;  // the game data folder's size (background count; WM_DATASIZE)
+bool g_data_counted = false;
 
 HWND item(int id) { return GetDlgItem(g_wnd, id); }
 
@@ -96,7 +114,70 @@ std::wstring get_text(int id) {
 void set_text(int id, const std::wstring& s) { SetWindowTextW(item(id), s.c_str()); }
 void show(int id, bool on) { ShowWindow(item(id), on ? SW_SHOWNA : SW_HIDE); }
 
-// ---- launcher.ini: where the player's files and the install folder are ----
+bool same_path(const fs::path& a, const fs::path& b) { return !a.empty() && !b.empty() && inside(a, b) && inside(b, a); }
+
+std::wstring size_text(unsigned long long b) {
+  if (b >= (1ull << 30)) return widen(ac4::strprintf("%.1f GB", double(b) / double(1ull << 30)));
+  if (b >= (1ull << 20)) return widen(ac4::strprintf("%.0f MB", double(b) / double(1ull << 20)));
+  return widen(ac4::strprintf("%.0f KB", double(b) / 1024.0));
+}
+
+unsigned long long free_bytes(fs::path p) {
+  std::error_code ec;
+  while (!p.empty() && !fs::exists(p, ec) && p != p.parent_path()) p = p.parent_path();
+  ULARGE_INTEGER avail{};
+  if (p.empty() || !GetDiskFreeSpaceExW(p.c_str(), &avail, nullptr, nullptr)) return 0;
+  return avail.QuadPart;
+}
+
+// ---- questions ----
+void log_question(const std::wstring&) {}
+
+int message(const std::wstring& text, UINT flags) {
+  log_question(L"message: " + text);
+  return MessageBoxW(g_wnd, text.c_str(), kTitle, flags);
+}
+
+struct Choice {
+  int id;
+  std::wstring text;  // a command link: the choice, then after a line break what it means
+};
+// A question over the launcher window: command links (or plain buttons), an optional check box
+// (*checked), a list behind "See details" (expanded). Returns the chosen id, IDCANCEL when closed.
+int ask(const std::wstring& main, const std::wstring& content, const std::vector<Choice>& choices, int def, bool links = true,
+        PCWSTR icon = nullptr, const std::wstring& check = L"", bool* checked = nullptr, const std::wstring& expanded = L"",
+        TASKDIALOG_COMMON_BUTTON_FLAGS common = 0) {
+  std::vector<TASKDIALOG_BUTTON> b;
+  std::wstring logged = L"question: " + main + L" | " + content + L" |";
+  for (const Choice& c : choices) {
+    b.push_back({c.id, c.text.c_str()});
+    logged += L" [" + std::to_wstring(c.id) + L"] " + c.text.substr(0, c.text.find(L'\n'));
+  }
+  if (!check.empty()) logged += L" | check: " + check;
+  log_question(logged);
+  TASKDIALOGCONFIG tc{};
+  tc.cbSize = sizeof tc;
+  tc.hwndParent = g_wnd;
+  tc.hInstance = g_inst;
+  tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW | (links ? TDF_USE_COMMAND_LINKS : 0);
+  tc.dwCommonButtons = common;
+  tc.pszWindowTitle = kTitle;
+  tc.pszMainIcon = icon;
+  tc.pszMainInstruction = main.c_str();
+  tc.pszContent = content.c_str();
+  tc.cButtons = UINT(b.size());
+  tc.pButtons = b.data();
+  tc.nDefaultButton = def;
+  if (!check.empty()) tc.pszVerificationText = check.c_str();
+  if (!expanded.empty()) tc.pszExpandedInformation = expanded.c_str();
+  int pressed = IDCANCEL;
+  BOOL verified = FALSE;
+  if (FAILED(TaskDialogIndirect(&tc, &pressed, nullptr, &verified))) return IDCANCEL;
+  if (checked) *checked = verified != FALSE;
+  return pressed;
+}
+
+// ---- launcher.ini: where the player's files and the game data are ----
 void load_paths() {
   ac4::Ini ini = ac4::Ini::load(g_ini_path);
   auto p = [&](const char* k) { return fs::path(widen(ini.get_or("paths", k, ""))); };
@@ -105,10 +186,12 @@ void load_paths() {
   g_cfg.data = p("install");
   g_rpcs3 = p("rpcs3");
   g_pup = p("pup");
+  g_place_ok = p("place_ok");
   g_user_override = p("user");  // optional: settings and saves somewhere else than Saved Games
 }
 
 void save_paths() {
+  if (g_offer_pending) return;  // a new copy writes its record once the earlier install is answered
   try {
     ac4::Ini ini = ac4::Ini::load(g_ini_path);
     if (ini.empty()) ini = ac4::Ini::parse("# ARMORED CORE 4 launcher: the locations chosen in the launcher\n");
@@ -117,11 +200,27 @@ void save_paths() {
     ini.set("paths", "install", narrow(g_cfg.data.wstring()));
     ini.set("paths", "rpcs3", narrow(g_rpcs3.wstring()));
     ini.set("paths", "pup", narrow(g_pup.wstring()));
+    ini.set("paths", "place_ok", narrow(g_place_ok.wstring()));
     std::error_code ec;
     fs::create_directories(g_ini_path.parent_path(), ec);
     ini.save(g_ini_path);
   } catch (const std::exception&) {
   }
+}
+
+// This launcher's install in the per-user record (install.h), so a newer launcher finds it. Only a
+// release launcher (one carrying the port's sources) records one.
+void note_install() {
+  if (!g_embedded || !has_install(g_cfg.data)) return;
+  Install i;
+  i.launcher = g_self;
+  i.data = g_cfg.data;
+  i.disc = g_cfg.disc;
+  i.files = g_cfg.files;
+  i.rpcs3 = g_rpcs3;
+  i.pup = g_pup;
+  i.version = AC4_VERSION;
+  record_install(i);
 }
 
 bool writable(const fs::path& dir) {
@@ -134,32 +233,19 @@ bool writable(const fs::path& dir) {
   return true;
 }
 
-fs::path local_appdata() {
-  PWSTR p = nullptr;
-  fs::path r;
-  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &p))) r = p;
-  CoTaskMemFree(p);
-  return r / L"AC4 Port";
-}
-
 // The player's own folder: settings.ini, savedata\ and backups\ (Saved Games\ARMORED CORE 4;
 // under Local AppData when Windows has no Saved Games folder; launcher.ini [paths] user names
 // another folder).
 fs::path user_dir() {
   if (!g_user_override.empty()) return g_user_override;
-  PWSTR p = nullptr;
-  fs::path r;
-  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_SavedGames, KF_FLAG_CREATE, nullptr, &p))) r = fs::path(p) / L"ARMORED CORE 4";
-  CoTaskMemFree(p);
-  return r.empty() ? local_appdata() / L"user" : r;
+  fs::path r = known_folder(UserFolder::SavedGames);
+  return r.empty() ? port_appdata() / L"user" : r / L"ARMORED CORE 4";
 }
 
 // The port's sources for a launcher built from them: it sits in their folder (a copy of the
 // repository) or in a build folder below. A release launcher carries its own (source.h).
 fs::path find_sources() {
-  wchar_t buf[MAX_PATH * 4];
-  GetModuleFileNameW(nullptr, buf, DWORD(std::size(buf)));
-  fs::path dir = fs::path(buf).parent_path();
+  fs::path dir = g_self.parent_path();
   for (int i = 0; i < 5 && !dir.empty(); ++i, dir = dir.parent_path()) {
     std::error_code ec;
     if (fs::exists(dir / "CMakeLists.txt", ec) && fs::exists(dir / "data" / "toolchain.txt", ec) && fs::exists(dir / "src" / "runtime", ec))
@@ -406,17 +492,7 @@ void start_checks() {
   }).detach();
 }
 
-// The install folder must not lie inside a folder holding the game files (nothing is written there).
-bool inside(const fs::path& child, const fs::path& parent) {
-  if (child.empty() || parent.empty()) return false;
-  std::error_code ec;
-  std::wstring c = fs::weakly_canonical(fs::absolute(child, ec), ec).wstring(), p = fs::weakly_canonical(fs::absolute(parent, ec), ec).wstring();
-  for (auto* s : {&c, &p}) {
-    for (auto& ch : *s) ch = wchar_t(towlower(ch));
-    while (s->size() > 3 && (s->back() == L'\\' || s->back() == L'/')) s->pop_back();
-  }
-  return c == p || (c.size() > p.size() && c.compare(0, p.size(), p) == 0 && (c[p.size()] == L'\\' || c[p.size()] == L'/'));
-}
+// The game data folder must not lie inside a folder holding the game files (nothing is written there).
 bool data_ok() {
   if (g_cfg.data.empty()) return false;
   for (const fs::path& in : {g_cfg.disc, g_cfg.files})
@@ -424,7 +500,7 @@ bool data_ok() {
   return true;
 }
 
-// A release launcher's sources, unpacked into the install folder (source.h) once that folder is
+// A release launcher's sources, unpacked into the game data folder (source.h) once that folder is
 // known to be outside the game's folders; report: a message box when that fails.
 bool ensure_source(bool report) {
   if (!g_embedded) return true;
@@ -434,7 +510,7 @@ bool ensure_source(bool report) {
   std::string err = unpack_source(g_cfg.src);
   if (err.empty()) return true;
   g_note = widen(err);
-  if (report) MessageBoxW(g_wnd, g_note.c_str(), kTitle, MB_ICONERROR);
+  if (report) message(g_note, MB_ICONERROR);
   return false;
 }
 
@@ -451,40 +527,72 @@ bool files_missing() {
   return eboot || g_files_check.verdict != Verdict::Ok;
 }
 
-// What the status line says when setup is not running.
+bool place_kept() { return same_path(g_place_ok, g_cfg.data); }
+
+// ---- the game data row ----
+// The folder, and below it its size, the space it needs, or why it is a poor place.
+void refresh_data_row() {
+  set_text(kDataEdit, g_cfg.data.wstring());
+  Risk r = place_risk(g_cfg.data);
+  bool installed = has_install(g_cfg.data);
+  std::wstring s;
+  if (!data_ok()) {
+    s = L"Inside a game folder: Change... chooses another place.";
+  } else if (r != Risk::None && !place_kept()) {
+    s = r == Risk::Downloads ? L"In Downloads: Windows' cleanup can delete files there (Change...)."
+        : r == Risk::Cloud   ? L"In a cloud-synced folder (OneDrive): gigabytes to upload (Change...)."
+                             : L"In a temporary folder, which Windows empties (Change...).";
+  } else if (installed) {
+    s = g_data_counted ? L"Holds " + size_text(g_data_bytes) + L"; " + size_text(free_bytes(g_cfg.data)) + L" free on that drive."
+                       : L"Counting...";
+  } else {
+    s = L"Set up puts about " + size_text(Setup::space_needed(g_cfg)) + L" here; " + size_text(free_bytes(g_cfg.data)) + L" free on that drive.";
+  }
+  set_text(kDataState, s);
+  InvalidateRect(item(kDataState), nullptr, TRUE);
+  if (installed && !g_data_counted) {
+    int gen = ++g_size_gen;
+    std::thread([d = g_cfg.data, gen] {
+      unsigned long long n = path_bytes(d);
+      PostMessageW(g_wnd, WM_DATASIZE, WPARAM(gen), LPARAM(new unsigned long long(n)));
+    }).detach();
+  }
+}
+bool data_row_bad() { return !data_ok() || (place_risk(g_cfg.data) != Risk::None && !place_kept()); }
+
+// What the status line says when setup is not running: the next step of the first start.
 std::wstring idle_status() {
   if (!g_note.empty()) return g_note;
+  if (g_removing) return L"Removing the game data...";
   if (g_ready) return L"Ready to play.";
-  if (!data_ok()) return L"Choose an install folder outside the game's folders (More > Install folder).";
-  fs::path p = g_cfg.data;
-  std::error_code ec;
-  while (!p.empty() && !fs::exists(p, ec)) p = p.parent_path();
-  ULARGE_INTEGER avail{};
-  GetDiskFreeSpaceExW(p.c_str(), &avail, nullptr, nullptr);
-  double need = double(Setup::space_needed(g_cfg)) / (1ull << 30), free = double(avail.QuadPart) / (1ull << 30);
-  std::wstring where = widen(ac4::strprintf("%.1f GB in ", need)) + g_cfg.data.wstring() + widen(ac4::strprintf(" (%.0f GB free)", free));
-  if (free < need) return L"Not enough space: setup needs " + where + L". More > Install folder chooses another place.";
+  if (!data_ok()) return L"The game data cannot go into a game folder: Change... beside Game data chooses another place.";
+  double need = double(Setup::space_needed(g_cfg)), free = double(free_bytes(g_cfg.data));
+  std::wstring where = size_text((unsigned long long)need) + L" in " + g_cfg.data.wstring() + L" (" + size_text((unsigned long long)free) + L" free)";
+  if (free < need) return L"Not enough space: setup needs " + where + L". Change... beside Game data chooses another place.";
+  if (g_cfg.disc.empty()) return L"First choose the game's folder: the copy of your disc, the folder with PS3_GAME in it (Browse... above).";
   if (files_missing())
-    return L"Prepare files makes them with your RPCS3 (rpcs3.net) and the PS3 update file PS3UPDAT.PUP 4.93 (playstation.com).";
+    return L"Next, the decrypted files: Prepare files makes them with your RPCS3 (rpcs3.net) and the PS3 update file PS3UPDAT.PUP "
+           L"4.93 (playstation.com), or Browse... chooses the files you decrypted yourself.";
   if (!inputs_ok()) return L"Setup starts when the files above are found: about " + where + L".";
+  if (has_build(g_cfg.data)) return L"Set up updates the game to version " AC4_VERSION_W L": it rebuilds only what changed, a few minutes.";
   return L"Set up prepares and builds the game once, a few minutes: " + where + L".";
 }
 
 void update_buttons() {
-  bool busy = g_setup.running() || g_prep.running(), playing = g_game != nullptr;
+  bool busy = g_setup.running() || g_prep.running() || g_removing, playing = g_game != nullptr;
   g_ready = !g_cfg.data.empty() && Setup::ready(g_cfg);
   bool prep = !busy && files_missing();
   show(kPrepFiles, prep);
   EnableWindow(item(kPrepFiles), !playing);
   show(kPrepare, !busy && !g_ready && !prep);
-  show(kCancel, busy);
+  show(kCancel, g_setup.running() || g_prep.running());
   show(kProgress, g_setup.running());
   EnableWindow(item(kPrepare), !playing && inputs_ok() && data_ok());
   EnableWindow(item(kPlay), !busy && !playing && g_ready && inputs_ok());
-  for (int id : {kDiscBrowse, kFilesBrowse, kDiscEdit, kFilesEdit}) EnableWindow(item(id), !busy && !playing);
+  for (int id : {kDiscBrowse, kFilesBrowse, kDiscEdit, kFilesEdit, kDataBrowse}) EnableWindow(item(id), !busy && !playing);
   for (int id : {kFps, kMode, kResolution}) EnableWindow(item(id), !playing && !g_cfg.data.empty());
   if (ac4::settings::Mode m = read_display().mode; m == ac4::settings::Mode::Borderless) EnableWindow(item(kResolution), FALSE);
-  if (!busy) set_text(kStatus, idle_status());
+  if (!g_setup.running() && !g_prep.running()) set_text(kStatus, idle_status());
   set_text(kPlayState, playing ? L"Playing." : g_ready && inputs_ok() && !busy ? L"Ready." : L"");
 }
 
@@ -535,39 +643,305 @@ fs::path pick(bool folder, const wchar_t* title, const fs::path& start, const wc
 }
 fs::path pick_folder(const wchar_t* title, const fs::path& start) { return pick(true, title, start); }
 
-fs::path downloads_dir() {
-  PWSTR p = nullptr;
-  fs::path r;
-  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &p))) r = p;
-  CoTaskMemFree(p);
-  return r;
+// A folder for the game data, chosen by the player: writable, not in a game folder or Temp (a
+// Downloads or cloud-synced folder only when the player insists). A folder that already holds
+// other things gets a folder of its own in it ("AC4 Port"). Empty: cancelled.
+fs::path pick_data_folder(const wchar_t* title) {
+  for (;;) {
+    fs::path p = pick_folder(title, g_cfg.data);
+    if (p.empty()) return p;
+    std::error_code ec;
+    if (fs::is_directory(p, ec) && !fs::is_empty(p, ec) && !has_install(p) && p.filename() != L"AC4 Port") p /= L"AC4 Port";
+    Risk r = place_risk(p);
+    if (r == Risk::Temp || inside(p, g_cfg.disc) || inside(p, g_cfg.files)) {
+      message(r == Risk::Temp ? L"That is a temporary folder, which Windows empties. Choose another one."
+                              : L"The game data cannot go into the game's folders. Choose another one.",
+              MB_ICONWARNING);
+      continue;
+    }
+    if (r != Risk::None && message(p.wstring() + L"\n\n" + risk_text(r) + L"\n\nUse this folder anyway?", MB_YESNO | MB_ICONWARNING) != IDYES)
+      continue;
+    if (!writable(p)) {
+      message(L"This folder cannot be written. Choose another one.", MB_ICONWARNING);
+      continue;
+    }
+    return p;
+  }
+}
+
+fs::path rebase(const fs::path& p, const fs::path& from, const fs::path& to) {
+  if (!inside(p, from)) return p;
+  std::error_code ec;
+  fs::path rel = fs::relative(p, from, ec);
+  return ec ? p : to / rel;
+}
+
+// The game data goes to p from now on (moved already, or a new install there).
+void set_data(const fs::path& p) {
+  std::error_code ec;
+  fs::path unused = g_self.parent_path() / L"local";  // the default beside the launcher, made at the start: not left behind empty
+  if (same_path(g_cfg.data, unused) && !same_path(p, unused) && fs::is_directory(unused, ec) && fs::is_empty(unused, ec)) fs::remove(unused, ec);
+  g_cfg.data = p;
+  g_place_ok.clear();
+  g_data_counted = false;
+  save_paths();
+  if (g_embedded && !g_cfg.disc.empty()) ensure_source(true);
+  move_to_user_dir();
+  load_settings_controls();
+  refresh_data_row();
+  note_install();
+  set_text(kFilesEdit, g_cfg.files.wstring());
+  refresh_paths_from_ui();
+}
+
+// Moves the game data to a folder on the same drive; the decrypted files Prepare files made move
+// with it. Returns false (after telling the player) when it could not.
+bool move_data_to(const fs::path& to) {
+  fs::path from = g_cfg.data;
+  std::string err = move_data(from, to);
+  if (!err.empty()) {
+    message(widen(err) + L"\n\nThe game data stays in " + from.wstring() + L".", MB_ICONWARNING);
+    return false;
+  }
+  g_cfg.files = rebase(g_cfg.files, from, to);
+  set_data(to);
+  return true;
+}
+
+// Before anything goes into the game data folder (Prepare files, Set up): a better place than
+// Downloads, a cloud-synced folder or Temp. Returns false when the player closed the question.
+bool confirm_place() {
+  Risk r = place_risk(g_cfg.data);
+  if (r == Risk::None || place_kept()) return true;
+  fs::path la = port_appdata() / L"Game data";
+  std::error_code ec;
+  bool la_free = !fs::exists(la, ec) || fs::is_empty(la, ec);
+  std::wstring where = g_cfg.data.wstring();
+  if (!has_install(g_cfg.data)) {
+    SetupConfig at = g_cfg;
+    at.data = la;
+    std::vector<Choice> ch;
+    if (la_free || has_install(la))
+      ch.push_back({kPlaceAppData, L"Put it in your Local AppData folder\n" + la.wstring() + L" (" + size_text(free_bytes(la)) + L" free on that drive)"});
+    ch.push_back({kPlacePick, L"Choose another folder..."});
+    ch.push_back({kPlaceKeep, L"Keep it here\n" + where});
+    int a = ask(L"Where should the game data go?",
+                L"Set up puts about " + size_text(Setup::space_needed(at)) + L" of game data (build tools, the prepared files and the game) into\n" +
+                    where + L"\n\n" + risk_text(r),
+                ch, ch.front().id);
+    if (a == kPlaceAppData) {
+      set_data(la);
+      return true;
+    }
+    if (a == kPlacePick) {
+      fs::path p = pick_data_folder(L"Where the game data goes");
+      if (p.empty()) return false;
+      set_data(p);
+      return true;
+    }
+    if (a != kPlaceKeep) return false;
+  } else {
+    if (!la_free || !same_volume(g_cfg.data, la)) return true;  // nothing better at once: the row says why
+    int a = ask(L"Move the game data to a safer place?",
+                L"The game data (" + size_text(path_bytes(g_cfg.data)) + L") is in\n" + where + L"\n\n" + risk_text(r),
+                {{kPlaceMove, L"Move it to your Local AppData folder\n" + la.wstring() + L": on the same drive, at once. Set up then builds the game again."},
+                 {kPlaceKeep, L"Keep it here\nNot asked again for this folder."}},
+                kPlaceMove);
+    if (a == kPlaceMove) return move_data_to(la);
+    if (a != kPlaceKeep) return false;
+  }
+  g_place_ok = g_cfg.data;
+  save_paths();
+  refresh_data_row();
+  return true;
+}
+
+// Change... beside Game data: another folder; an install there moves along (same drive) or stays
+// where it is while a new one starts.
+void change_data_folder() {
+  bool installed = has_install(g_cfg.data);
+  fs::path p = pick_data_folder(installed ? L"Where the game data goes (it moves there)" : L"Where the game data goes");
+  if (p.empty() || same_path(p, g_cfg.data)) return;
+  if (installed && !has_install(p)) {
+    bool can_move = same_volume(g_cfg.data, p);
+    std::vector<Choice> ch;
+    if (can_move) ch.push_back({kMoveIt, L"Move the game data there\nOn the same drive, at once. Set up then builds the game again."});
+    ch.push_back({kNewInstall, L"Start a new install there\nPrepare files and Set up again there; the current game data stays in " + g_cfg.data.wstring() +
+                                   L" until you delete it."});
+    int a = ask(L"Move the game data?", L"The game data is in " + g_cfg.data.wstring() + (can_move ? L"." : L"; the new folder is on another drive."), ch,
+                ch.front().id, true, nullptr, L"", nullptr, L"", TDCBF_CANCEL_BUTTON);
+    if (a == kMoveIt) {
+      move_data_to(p);
+      return;
+    }
+    if (a != kNewInstall) return;
+  }
+  set_data(p);
+}
+
+// ---- an earlier install (a new copy of the launcher, extracted into another folder) ----
+void offer_earlier_install() {
+  std::vector<Install> found = earlier_installs(g_self);
+  if (found.empty() || has_install(g_cfg.data)) {  // nothing to offer, or this copy has its own
+    g_offer_pending = false;
+    save_paths();
+    return;
+  }
+  const Install& i = found.front();
+  // The game data in an earlier release's folder (its "local" beside a launcher): that folder must
+  // stay, unless the data moves beside this launcher.
+  fs::path old_dir = i.data.parent_path(), here = g_self.parent_path() / L"local";
+  std::error_code ec;
+  bool in_old = i.data.filename() == L"local" &&
+                (fs::is_regular_file(old_dir / L"AC4-Launcher.exe", ec) || fs::is_regular_file(old_dir / L"launcher.ini", ec));
+  bool can_move = in_old && (!fs::exists(here, ec) || fs::is_empty(here, ec)) && same_volume(i.data, here) && place_risk(here) == Risk::None;
+  std::vector<Choice> ch;
+  ch.push_back({kUseIt, L"Use it\n" + (in_old ? L"The game data stays in " + i.data.wstring() + L": keep the folder " + old_dir.wstring() + L"."
+                                              : L"The game data stays in " + i.data.wstring() + L".")});
+  if (can_move)
+    ch.push_back({kMoveIt, L"Move it beside this launcher\nTo " + here.wstring() + L", at once (same drive). Set up then builds the game again in full; " +
+                               old_dir.wstring() + L" can be deleted afterwards."});
+  ch.push_back({kNewInstall, L"Set up a new install here\nPrepare files and Set up as for a first install."});
+  HCURSOR cur = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+  unsigned long long bytes = path_bytes(i.data);
+  SetCursor(cur);
+  std::wstring content = L"Found the install of " + (i.version.empty() ? std::wstring(L"an earlier launcher") : L"version " + widen(i.version)) +
+                         L":\nGame data: " + i.data.wstring() + L" (" + size_text(bytes) + L")" +
+                         (i.disc.empty() ? L"" : L"\nGame folder: " + i.disc.wstring()) +
+                         L"\n\nUsing it, this launcher only rebuilds what changed (Set up, a few minutes): no Prepare files again, no "
+                         L"download of the build tools. Your settings and saves are not affected.";
+  int a = ask(L"Use your earlier install?", content, ch, kUseIt);
+  g_offer_pending = false;  // closed: launcher.ini comes with the player's next choice, else asked again at the next start
+  if (a != kUseIt && a != kMoveIt && a != kNewInstall) return;
+  if (a == kNewInstall) {
+    save_paths();
+    return;
+  }
+  g_cfg.disc = i.disc;
+  g_cfg.files = i.files;
+  if (!i.rpcs3.empty()) g_rpcs3 = i.rpcs3;
+  if (!i.pup.empty()) g_pup = i.pup;
+  set_text(kDiscEdit, g_cfg.disc.wstring());
+  g_cfg.data = i.data;
+  if (a == kMoveIt) {
+    if (move_data_to(here)) return;
+  }
+  set_data(i.data);
+}
+
+// After the first successful Set up (once per Windows user; More... offers them again).
+void offer_shortcuts() {
+  if (!read_shortcuts().answer.empty()) return;
+  int a = message(L"Set up is done.\n\nAdd a desktop shortcut and a Start menu entry for the launcher? They open this window; PLAY starts the "
+                  L"game.\n\n(More... adds or removes them later.)",
+                  MB_YESNO | MB_ICONQUESTION);
+  if (!read_shortcuts().answer.empty()) return;  // answered meanwhile (More...)
+  if (a != IDYES) {
+    record_shortcut_answer("no");
+    return;
+  }
+  std::string err = make_shortcuts(g_self, AC4_VERSION);
+  if (!err.empty()) message(widen(err), MB_ICONWARNING);
+}
+
+// ---- removing the game data ----
+struct RemoveResult {
+  std::vector<fs::path> failed;
+  fs::path backup;
+  std::wstring error;
+};
+
+void remove_game_data() {
+  HCURSOR cur = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+  std::vector<RemoveItem> items = removal_items(g_cfg.data);
+  SetCursor(cur);
+  unsigned long long total = 0;
+  std::wstring list, paths;
+  for (const RemoveItem& it : items) {
+    total += it.bytes;
+    list += L"\x2022 " + it.what + (it.bytes >= 1024 ? L": " + size_text(it.bytes) : L"") + L"\n";
+    for (const fs::path& p : it.paths) paths += p.wstring() + L"\n";
+  }
+  fs::path user = user_dir();
+  std::wstring content = items.empty() ? L"The folder " + g_cfg.data.wstring() + L" holds no game data.\n"
+                                       : L"From " + g_cfg.data.wstring() + L":\n" + list + L"In all " + size_text(total) +
+                                             L". The game's folder, and decrypted files you keep elsewhere, are not touched.\n";
+  content += L"\nYour saves and settings stay unless you tick the box below.";
+  std::wstring check = L"Also remove my saves and settings in " + user.wstring() + L" (they are moved to a backup folder beside it, \"" +
+                       user.filename().wstring() + L" backup\" with the date)";
+  bool saves = false;
+  int a = ask(L"Remove the game data?", content, {{kRemoveNow, L"Remove"}}, IDCANCEL, false, TD_WARNING_ICON, check, &saves, paths,
+              TDCBF_CANCEL_BUTTON);
+  if (a != kRemoveNow || (items.empty() && !saves)) return;
+  g_removing = true;
+  g_note.clear();
+  update_buttons();
+  std::thread([items, data = g_cfg.data, saves, user] {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);  // the shortcuts are read and deleted through the shell
+    auto* r = new RemoveResult;
+    if (saves) r->backup = back_up_user_dir(user, data, &r->error);
+    if (r->error.empty()) r->failed = remove_items(items, data);
+    CoUninitialize();
+    PostMessageW(g_wnd, WM_REMOVED, 0, LPARAM(r));
+  }).detach();
+}
+
+void on_removed(RemoveResult* r) {
+  g_removing = false;
+  if (!r->error.empty()) {
+    message(r->error, MB_ICONWARNING);
+    update_buttons();
+    return;
+  }
+  forget_install(g_cfg.data);
+  std::error_code ec;
+  fs::remove(g_ini_path, ec);  // the launcher's record of the chosen locations
+  fs::path folder = g_self.parent_path();
+  std::wstring text = L"The game data is removed.";
+  if (!r->failed.empty()) {
+    text = L"These could not be deleted (a file in them may be in use):\n";
+    for (const fs::path& p : r->failed) text += p.wstring() + L"\n";
+  }
+  if (!r->backup.empty()) text += L"\n\nYour saves and settings were moved to\n" + r->backup.wstring();
+  text += L"\n\nTo finish, delete the launcher's folder:\n" + folder.wstring();
+  int a = ask(r->failed.empty() ? L"Removed" : L"Removed, with exceptions", text,
+              {{kShowFolder, L"Show the launcher's folder and close the launcher"}, {kCloseNow, L"Close the launcher"}}, kShowFolder, false);
+  if (a == kShowFolder) {
+    if (PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(folder.c_str())) {
+      SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+      ILFree(pidl);
+    }
+  }
+  delete r;
+  DestroyWindow(g_wnd);
 }
 
 // ---- Prepare files: the player's RPCS3 makes the decrypted files (rpcs3.h) ----
 void prepare_files() {
   std::error_code ec;
   if (!fs::is_regular_file(g_cfg.disc / "PS3_GAME" / "USRDIR" / "EBOOT.BIN", ec)) {
-    MessageBoxW(g_wnd, L"Choose the game's folder first (the one with PS3_GAME).", kTitle, MB_ICONINFORMATION);
+    message(L"Choose the game's folder first (the one with PS3_GAME).", MB_ICONINFORMATION);
     return;
   }
+  if (!confirm_place()) return;  // the files go into the game data folder
   fs::path exe = g_rpcs3;
   if (!fs::is_regular_file(exe, ec)) {
-    exe = pick(false, L"Your RPCS3 (rpcs3.exe; get it from rpcs3.net): it prepares the files once", downloads_dir(), L"RPCS3", L"rpcs3.exe");
+    exe = pick(false, L"Your RPCS3 (rpcs3.exe; get it from rpcs3.net): it prepares the files once", known_folder(UserFolder::Downloads), L"RPCS3",
+               L"rpcs3.exe");
     if (exe.empty()) return;
   }
   fs::path pup;
   if (rpcs3_system_software(exe) != "4.93") {  // else RPCS3 has the system modules already
     pup = g_pup;
     if (pup_version(pup) != "4.93") {
-      pup = pick(false, L"PS3 system software 4.93 update file (PS3UPDAT.PUP, from playstation.com)", downloads_dir(), L"PS3 system software update",
-                 L"*.PUP");
+      pup = pick(false, L"PS3 system software 4.93 update file (PS3UPDAT.PUP, from playstation.com)", known_folder(UserFolder::Downloads),
+                 L"PS3 system software update", L"*.PUP");
       if (pup.empty()) return;
       std::string v = pup_version(pup);
       if (v != "4.93") {
-        MessageBoxW(g_wnd,
-                    v.empty() ? L"This is not a PS3 system software update file (PS3UPDAT.PUP)."
-                              : (L"This update file is PS3 system software " + widen(v) + L"; the port needs 4.93 (playstation.com).").c_str(),
-                    kTitle, MB_ICONWARNING);
+        message(v.empty() ? L"This is not a PS3 system software update file (PS3UPDAT.PUP)."
+                          : L"This update file is PS3 system software " + widen(v) + L"; the port needs 4.93 (playstation.com).",
+                MB_ICONWARNING);
         return;
       }
     }
@@ -585,9 +959,6 @@ void prepare_files() {
   g_prep.start(job, [] { PostMessageW(g_wnd, WM_PREP, 0, 0); });
   update_buttons();
 }
-
-void start_checks();
-void refresh_paths_from_ui();
 
 // An RPCS3 window waiting for the player during Prepare files: brought to the front once, or
 // flashing in the taskbar when Windows keeps the focus with another program.
@@ -614,6 +985,9 @@ void on_prep_update() {
     set_text(kFilesEdit, (g_cfg.data / "decrypted").wstring());
     g_note = widen(v.note);
     refresh_paths_from_ui();
+    note_install();
+    g_data_counted = false;
+    refresh_data_row();
   } else {
     g_note = widen(v.error);
     update_buttons();
@@ -631,7 +1005,7 @@ void play(bool safe_mode) {
   PROCESS_INFORMATION pi{};
   // Only the game's window: no console (the run log holds every message).
   if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, g_cfg.data.c_str(), &si, &pi)) {
-    MessageBoxW(g_wnd, L"The game could not be started.", kTitle, MB_ICONERROR);
+    message(L"The game could not be started.", MB_ICONERROR);
     return;
   }
   CloseHandle(pi.hThread);
@@ -664,10 +1038,11 @@ struct Place {
 const Place kPlaces[] = {
     {kDiscEdit, 124, 14, 324, 24},   {kDiscBrowse, 454, 13, 90, 26},   {kDiscState, 124, 41, 420, 18},
     {kFilesEdit, 124, 68, 324, 24},  {kFilesBrowse, 454, 67, 90, 26},  {kFilesState, 124, 95, 420, 18},
-    {kPrepare, 16, 124, 98, 28},     {kCancel, 16, 124, 98, 28},       {kPrepFiles, 16, 124, 98, 28},
-    {kStatus, 124, 124, 420, 34},    {kProgress, 124, 162, 420, 10},
-    {kMode, 124, 186, 190, 300},     {kResolution, 320, 186, 224, 300}, {kFps, 124, 220, 190, 300},
-    {kMore, 16, 266, 98, 30},        {kPlayState, 124, 272, 200, 20},  {kPlay, 334, 254, 210, 50},
+    {kDataEdit, 124, 122, 324, 24},  {kDataBrowse, 454, 121, 90, 26},  {kDataState, 124, 149, 420, 18},
+    {kPrepare, 16, 178, 98, 28},     {kCancel, 16, 178, 98, 28},       {kPrepFiles, 16, 178, 98, 28},
+    {kStatus, 124, 178, 420, 34},    {kProgress, 124, 216, 420, 10},
+    {kMode, 124, 240, 190, 300},     {kResolution, 320, 240, 224, 300}, {kFps, 124, 274, 190, 300},
+    {kMore, 16, 320, 98, 30},        {kPlayState, 124, 326, 200, 20},  {kPlay, 334, 308, 210, 50},
 };
 struct Label {
   int x, y, w, h;
@@ -676,10 +1051,11 @@ struct Label {
 const Label kLabels[] = {
     {16, 17, 104, 20, L"Game folder"},
     {16, 71, 104, 20, L"Decrypted files"},
-    {16, 189, 104, 20, L"Display"},
-    {16, 223, 104, 20, L"Frame rate"},
+    {16, 125, 104, 20, L"Game data"},
+    {16, 243, 104, 20, L"Display"},
+    {16, 277, 104, 20, L"Frame rate"},
 };
-constexpr int kClientW = 560, kClientH = 318;
+constexpr int kClientW = 560, kClientH = 372;
 
 void layout() {
   for (const Place& p : kPlaces) SetWindowPos(item(p.id), nullptr, S(p.x), S(p.y), S(p.w), S(p.h), SWP_NOZORDER | SWP_NOACTIVATE);
@@ -716,6 +1092,9 @@ void create_controls() {
     make(L"BUTTON", L"Browse...", WS_TABSTOP | BS_PUSHBUTTON, kDiscBrowse + i);
     make(L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS, kDiscState + i);
   }
+  make(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY, kDataEdit, WS_EX_CLIENTEDGE);
+  make(L"BUTTON", L"Change...", WS_TABSTOP | BS_PUSHBUTTON, kDataBrowse);
+  make(L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS, kDataState);
   make(L"BUTTON", L"Prepare files", WS_TABSTOP | BS_PUSHBUTTON, kPrepFiles);
   make(L"BUTTON", L"Set up", WS_TABSTOP | BS_PUSHBUTTON, kPrepare);
   make(L"BUTTON", L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, kCancel);
@@ -733,7 +1112,7 @@ void create_controls() {
 
 // The More menu: everything beyond the bare necessities.
 void more_menu() {
-  bool playing = g_game != nullptr, busy = g_setup.running(), data = !g_cfg.data.empty();
+  bool playing = g_game != nullptr, busy = g_setup.running() || g_prep.running() || g_removing, data = !g_cfg.data.empty();
   ac4::settings::Display d = read_display();
   HMENU scale = CreatePopupMenu();
   g_scale_items.clear();
@@ -775,10 +1154,14 @@ void more_menu() {
               L"Play in safe mode (default display settings, this start only)");
   AppendMenuW(m, MF_STRING | idle, kMenuResetSettings, L"Reset all settings...");
   AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(m, MF_STRING | (!busy && !playing ? 0 : MF_GRAYED), kMenuInstall, (L"Install folder: " + g_cfg.data.wstring() + L"...").c_str());
   AppendMenuW(m, MF_STRING | (!busy && !playing && g_ready && inputs_ok() ? 0 : MF_GRAYED), kMenuRebuild, L"Rebuild the game");
   AppendMenuW(m, MF_STRING | (data ? 0 : MF_GRAYED), kMenuOpenLog, L"Open the setup log");
   AppendMenuW(m, MF_STRING, kMenuWhichFiles, L"Which files does the port need?");
+  AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(m, MF_STRING | (g_embedded && !busy ? 0 : MF_GRAYED), kMenuShortcuts,
+              read_shortcuts().made() ? L"Remove the desktop shortcut and Start menu entry" : L"Add a desktop shortcut and Start menu entry");
+  // A launcher built from a source tree (development) uses that tree's own folders: nothing to remove.
+  AppendMenuW(m, MF_STRING | (g_embedded && !busy && !playing && data ? 0 : MF_GRAYED), kMenuRemove, L"Remove game data...");
   RECT r{};
   GetWindowRect(item(kMore), &r);
   TrackPopupMenu(m, TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON, r.left, r.top, 0, g_wnd, nullptr);
@@ -787,10 +1170,15 @@ void more_menu() {
 
 void start_setup() {
   g_note.clear();
+  if (!confirm_place()) {
+    update_buttons();
+    return;
+  }
   if (!ensure_source(true)) {
     update_buttons();
     return;
   }
+  g_setup_reported = false;
   g_setup.start(g_cfg, [] { PostMessageW(g_wnd, WM_SETUP, 0, 0); });
   update_buttons();
 }
@@ -801,11 +1189,28 @@ void on_setup_update() {
   size_t done = 0;
   for (const auto& s : v.steps) done += s.state == StepState::Done || s.state == StepState::Skipped;
   if (v.running) set_text(kStatus, widen(ac4::strprintf("Step %zu of %zu: ", std::min(done + 1, v.steps.size()), v.steps.size()) + v.status));
-  if (v.finished) {
+  if (v.finished && !g_setup_reported) {
+    g_setup_reported = true;  // a question below runs a message loop: later notifications must not repeat this
     if (!v.ok) g_note = v.cancelled ? L"Cancelled. Set up continues where it stopped." : widen(v.error) + L" (More > Open the setup log)";
     update_buttons();
-    if (v.ok) FlashWindow(g_wnd, TRUE);
+    if (v.ok) {
+      note_install();
+      g_data_counted = false;
+      refresh_data_row();
+      FlashWindow(g_wnd, TRUE);
+      if (g_embedded && read_shortcuts().answer.empty()) offer_shortcuts();
+    }
   }
+}
+
+// At the start, with the window up: shortcuts of an older launcher open this one; a new copy of
+// the launcher offers the earlier install.
+void on_startup() {
+  if (g_embedded && retarget_shortcuts(g_self, AC4_VERSION)) g_note = L"The desktop shortcut and the Start menu entry now open this launcher.";
+  if (g_offer_pending) offer_earlier_install();
+  note_install();
+  refresh_data_row();
+  update_buttons();
 }
 
 // The check results: one line per folder (update_buttons adds how to get missing files).
@@ -822,6 +1227,7 @@ void show_checks() {
 }
 
 Verdict verdict_of(int id) {
+  if (id == kDataState) return data_row_bad() ? Verdict::Bad : Verdict::Empty;
   std::lock_guard lk(g_check_mu);
   if (!g_checked) return Verdict::Empty;
   return id == kDiscState ? g_disc_check.verdict : g_files_check.verdict;
@@ -881,11 +1287,14 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
           if (!p.empty()) set_text(kFilesEdit, p.wstring()), refresh_paths_from_ui();
           break;
         }
+        case kDataBrowse:
+          if (IsWindowEnabled(item(kDataBrowse))) change_data_folder();
+          break;
         case kMenuWhichFiles:
           MessageBoxW(g_wnd, files_help().c_str(), L"The files the port needs", MB_ICONINFORMATION);
           break;
         case kPrepFiles:
-          if (IsWindowEnabled(item(kPrepFiles)) && !g_prep.running() && !g_setup.running()) prepare_files();
+          if (IsWindowEnabled(item(kPrepFiles)) && !g_prep.running() && !g_setup.running() && !g_removing) prepare_files();
           break;
         case kPrepare:
           if (IsWindowEnabled(item(kPrepare))) start_setup();
@@ -911,21 +1320,20 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
           if (fs::exists(log)) ShellExecuteW(g_wnd, L"open", log.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
           break;
         }
-        case kMenuInstall: {
-          fs::path p = pick_folder(L"Install folder (tools, prepared files, build)", g_cfg.data);
-          if (p.empty()) break;
-          if (!writable(p)) {
-            MessageBoxW(g_wnd, L"This folder cannot be written. Choose another one.", kTitle, MB_ICONWARNING);
-            break;
+        case kMenuShortcuts:
+          if (read_shortcuts().made()) {
+            remove_shortcuts();
+            g_note = L"The desktop shortcut and the Start menu entry are removed.";
+          } else if (std::string err = make_shortcuts(g_self, AC4_VERSION); !err.empty()) {
+            message(widen(err), MB_ICONWARNING);
+          } else {
+            g_note = L"Shortcuts added: on the desktop and in the Start menu.";
           }
-          g_cfg.data = p;
-          save_paths();
-          if (g_embedded && !g_cfg.disc.empty()) ensure_source(true);
-          move_to_user_dir();
-          load_settings_controls();
           update_buttons();
           break;
-        }
+        case kMenuRemove:
+          if (g_embedded && !g_setup.running() && !g_prep.running() && !g_removing && !g_game) remove_game_data();
+          break;
         case kMenuResetSettings: {
           if (MessageBoxW(g_wnd,
                           L"Reset every setting (display, frame rate, mouse, key bindings) to its default?\n"
@@ -983,6 +1391,20 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PREP:
       on_prep_update();
       return 0;
+    case WM_STARTUP:
+      on_startup();
+      return 0;
+    case WM_DATASIZE: {
+      std::unique_ptr<unsigned long long> n(reinterpret_cast<unsigned long long*>(lp));
+      if (int(wp) != g_size_gen) return 0;
+      g_data_bytes = *n;
+      g_data_counted = true;
+      refresh_data_row();
+      return 0;
+    }
+    case WM_REMOVED:
+      on_removed(reinterpret_cast<RemoveResult*>(lp));
+      return 0;
     case WM_CHECKED:
       if (int(wp) != g_check_gen) return 0;
       show_checks();
@@ -1012,7 +1434,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       int id = GetDlgCtrlID(HWND(lp));
       HDC dc = HDC(wp);
       SetBkMode(dc, TRANSPARENT);
-      if (id == kDiscState || id == kFilesState) SetTextColor(dc, verdict_color(verdict_of(id)));
+      if (id == kDiscState || id == kFilesState || id == kDataState) SetTextColor(dc, verdict_color(verdict_of(id)));
       return LRESULT(GetSysColorBrush(COLOR_WINDOW));
     }
     case WM_DPICHANGED: {
@@ -1024,7 +1446,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     }
     case WM_CLOSE:
-      if ((g_setup.running() || g_prep.running()) &&
+      if ((g_setup.running() || g_prep.running() || g_removing) &&
           MessageBoxW(h, L"The launcher is still working. Stop it and close?", kTitle, MB_YESNO | MB_ICONQUESTION) != IDYES)
         return 0;
       g_setup.cancel();
@@ -1042,9 +1464,10 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
   g_inst = inst;
-  // One launcher per install (a copy of the port in another folder may run beside it).
   wchar_t self_path[MAX_PATH * 4];
   GetModuleFileNameW(nullptr, self_path, DWORD(std::size(self_path)));
+  g_self = self_path;
+  // One launcher per install (a copy of the port in another folder may run beside it).
   std::wstring self_key = self_path;
   for (auto& ch : self_key) ch = wchar_t(towlower(ch));
   unsigned long long fnv = 1469598103934665603ull;
@@ -1086,9 +1509,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
     return 1;
   }
   // The launcher's own record of the chosen locations: beside it when that folder is writable.
-  wchar_t self[MAX_PATH * 4];
-  GetModuleFileNameW(nullptr, self, DWORD(std::size(self)));
-  fs::path exe_dir = fs::path(self).parent_path();
+  fs::path exe_dir = g_self.parent_path();
   // Started from inside the release zip, Windows runs a copy in a temporary folder: the install
   // folder and the launcher's record would be made there and lost.
   wchar_t temp[MAX_PATH + 1];
@@ -1100,14 +1521,22 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
                 kTitle, MB_ICONINFORMATION);
     return 1;
   }
-  g_ini_path = (writable(exe_dir) ? exe_dir : local_appdata()) / "launcher.ini";
+  g_ini_path = (writable(exe_dir) ? exe_dir : port_appdata()) / "launcher.ini";
+  {
+    std::error_code ec;
+    g_offer_pending = g_embedded && !fs::exists(g_ini_path, ec);  // a new copy: an earlier install may be offered
+  }
   load_paths();
-  // The install folder: the port's (or, for a release launcher, the launcher's) folder's "local"
+  // The game data folder: the port's (or, for a release launcher, the launcher's) folder's "local"
   // when it can be written, else under Local AppData.
   fs::path home = g_embedded ? exe_dir : g_src;
-  if (g_cfg.data.empty()) g_cfg.data = writable(home / "local") ? home / "local" : local_appdata();
+  if (g_cfg.data.empty()) g_cfg.data = writable(home / "local") ? home / "local" : port_appdata();
   g_cfg.src = g_embedded ? g_cfg.data / "source" : g_src;
-  if (g_embedded && !g_cfg.disc.empty()) ensure_source(false);  // where the game is known (never inside it)
+  // The sources go where the game is known (never inside it); a first install waits for the place
+  // question when the game data would go into Downloads or a cloud-synced folder (nothing is
+  // written there before the player chose), an install already there gets them (its update shows).
+  if (g_embedded && !g_cfg.disc.empty() && (has_install(g_cfg.data) || place_risk(g_cfg.data) == Risk::None || place_kept()))
+    ensure_source(false);
   {
     std::error_code ec;
     if (g_cfg.files.empty() && fs::is_regular_file(g_cfg.data / "decrypted" / "EBOOT.elf", ec)) g_cfg.files = g_cfg.data / "decrypted";
@@ -1141,9 +1570,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
   set_text(kDiscEdit, g_cfg.disc.wstring());
   set_text(kFilesEdit, g_cfg.files.wstring());
   refresh_paths_from_ui();
+  refresh_data_row();
   load_settings_controls();
   update_buttons();
   ShowWindow(g_wnd, show_cmd);
+  PostMessageW(g_wnd, WM_STARTUP, 0, 0);
   MSG m;
   while (GetMessageW(&m, nullptr, 0, 0) > 0) {
     if (IsDialogMessageW(g_wnd, &m)) continue;

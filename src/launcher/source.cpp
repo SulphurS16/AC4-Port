@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include <fstream>
+#include <iterator>
 
 #include "common/crypto.h"
 #include "common/file.h"
@@ -46,6 +47,27 @@ std::string read_line(const fs::path& p) {
   return s;
 }
 
+std::string read_all(const fs::path& p) {
+  std::ifstream f(p, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+
+// Files the earlier copy had with the same content keep their earlier time, so the build redoes
+// only what depends on the files that changed (an update rebuilds what changed, not everything).
+void keep_times(const fs::path& fresh, const fs::path& old) {
+  std::error_code ec;
+  if (!fs::is_directory(old, ec)) return;
+  for (auto it = fs::recursive_directory_iterator(fresh, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    std::error_code e2;
+    if (!it->is_regular_file(e2)) continue;
+    fs::path prev = old / fs::relative(it->path(), fresh, e2);
+    if (e2 || !fs::is_regular_file(prev, e2) || fs::file_size(prev, e2) != it->file_size(e2)) continue;
+    if (read_all(prev) != read_all(it->path())) continue;
+    auto t = fs::last_write_time(prev, e2);
+    if (!e2) fs::last_write_time(it->path(), t, e2);
+  }
+}
+
 }  // namespace
 
 bool has_embedded_source() { return embedded().size != 0; }
@@ -77,7 +99,8 @@ std::string unpack_source(const fs::path& dir) {
   }
   // Windows' own tar (Windows 10 1803 and later) unpacks zip archives, as it does the build tools.
   // -m: the files get the time of unpacking, newer than any earlier build's outputs, so the build
-  // redoes what depends on them (the archive's own times are fixed, for a reproducible launcher).
+  // redoes what depends on them (the archive's own times are fixed, for a reproducible launcher);
+  // unchanged files then get their earlier copy's time back (keep_times).
   wchar_t sys[MAX_PATH];
   GetSystemDirectoryW(sys, MAX_PATH);
   fs::path tar = fs::path(sys) / L"tar.exe";
@@ -97,6 +120,7 @@ std::string unpack_source(const fs::path& dir) {
     fs::remove_all(fresh, ec);
     return failed + ".";
   }
+  if (fs::exists(dir / kStamp, ec)) keep_times(fresh, dir);
   try {
     ac4::write_text(fresh / kStamp, blob_id(b) + "\n");
   } catch (const std::exception& e) {

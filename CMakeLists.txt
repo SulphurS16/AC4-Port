@@ -143,6 +143,7 @@ add_executable(ac4-launcher WIN32
   src/launcher/rpcs3.cpp
   src/launcher/download.cpp
   src/launcher/source.cpp
+  src/launcher/install.cpp
   src/launcher/launcher.rc)
 # The launcher's file version (its properties): the numbers of VERSION, for its resource file only.
 string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)" ac4_version_numbers "${AC4_VERSION}")
@@ -158,7 +159,7 @@ if(AC4_SOURCE_ZIP)
   set_source_files_properties(${CMAKE_BINARY_DIR}/launcher_source.rc PROPERTIES OBJECT_DEPENDS "${ac4_source_zip}")
 endif()
 target_include_directories(ac4-launcher PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(ac4-launcher PRIVATE ac4_common comctl32 winhttp shell32 ole32 uuid)
+target_link_libraries(ac4-launcher PRIVATE ac4_common comctl32 winhttp shell32 ole32 uuid advapi32)
 target_link_options(ac4-launcher PRIVATE -municode)
 target_compile_options(ac4-launcher PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
 set_target_properties(ac4-launcher PROPERTIES OUTPUT_NAME AC4-Launcher)

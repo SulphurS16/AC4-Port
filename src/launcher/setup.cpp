@@ -444,7 +444,8 @@ void Setup::run(SetupConfig c) {
          "Importing the game files failed"},
         {kRecompile,
          [&] {
-           fs::remove_all(gen_dir(c) / "ppu", ec);
+           // ac4-recomp writes only the files whose code changed and removes stale ones: the build
+           // then compiles only those (an update rebuilds what changed).
            std::vector<std::wstring> a = {L"emit", w(prepared(c) / "eboot.elf"), w(gen_dir(c) / "ppu")};
            for (const char* m : ki::kModules) a.insert(a.end(), {L"--module", w(prepared(c) / "lle" / (widen(m) + L".elf"))});
            a.insert(a.end(), {L"--hooks", w(c.src / "src" / "runtime" / "game" / "hooks.txt"), L"--patches",
@@ -454,8 +455,7 @@ void Setup::run(SetupConfig c) {
          "Translating the game code failed"},
         {kSpu,
          [&] {
-           fs::remove_all(gen_dir(c) / "spu", ec);
-           fs::create_directories(gen_dir(c) / "spu", ec);
+           fs::create_directories(gen_dir(c) / "spu", ec);  // ac4-spurecomp, too, writes only what changed
            fs::remove_all(c.data / "spu_cache", ec);  // records of another system software version go too
            return exec(prep, {L"spu-records", L"--manifest", w(c.src / "data" / "spu_manifest.txt"), L"--out", w(c.data / "spu_cache"), w(prepared(c))},
                        c.data) &&
