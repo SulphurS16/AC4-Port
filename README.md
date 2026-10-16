@@ -102,12 +102,12 @@ All keys can be changed in game under **SYSTEM > PC SETTINGS**.
 - Display mode, resolution, render scale (50–200 %) and frame rate (30, 60, 120, 144, your display's rate or uncapped) are set in the launcher or in game under **SYSTEM > PC SETTINGS**. Game speed is the same at every frame rate.
 - The launcher has presets for modest PCs and handhelds under **More...**.
 - Settings and saves are in `Saved Games\ARMORED CORE 4`. **More...** in the launcher backs up and restores saves. Saves don't work on a PS3.
+- PS3 saves work once you have decrypted them. Copy each save folder (named 'BLUS30027...') into the savedata folder above.
+- RPCS3 saves should work as they are. Copy the same 'BLUS30027...' folders from RPCS3's savedata folder.
+
+Only saves from the US version (BLUS30027 are found.
 
 ## Community
 
 For more ports, questions, discussion and help join the [Discord](https://discord.gg/Z7pbJ2unX).
 Please don't share game files, keys, decrypted files or download links here or on the discord.
-
-## License
-
-MIT (`LICENSE`). Third-party notices: `THIRD_PARTY.md` and `licenses`. Version: the launcher's title bar; changes: `CHANGELOG.md`. To build the launcher from this repository: `powershell -ExecutionPolicy Bypass -File tools\build-launcher.ps1`.
