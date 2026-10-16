@@ -1,0 +1,5 @@
+// The game executable's resources: the port's icon (data/ac4.ico: 16, 32 and 48 px), the file's
+// icon and the game window's (gpu/window.cpp loads icon 1).
+#include <windows.h>
+
+1 ICON "../../data/ac4.ico"

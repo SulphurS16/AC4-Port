@@ -26,6 +26,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 std::atomic<int> g_active{0};
+std::atomic<u32> g_released{0};  // dialogs that gave the controller back (cellPadGetData reports in full after one)
 std::mutex g_mu;  // one dialog at a time
 
 // ---- scripted answers (--dialog, and live "dialog ..." control commands) ----
@@ -172,7 +173,10 @@ void use_keys(Dlg* d) {  // keys or a controller took over from the mouse
 bool show(Dlg* d) {
   struct Hold {
     Hold() { g_active.fetch_add(1); }
-    ~Hold() { g_active.fetch_sub(1); }
+    ~Hold() {
+      g_released.fetch_add(1);  // first: a pad read that sees the dialog gone also sees the release
+      g_active.fetch_sub(1);
+    }
   } hold;
   if (!gpu::window_handle()) return false;
   d->pad_last = pad_now();
@@ -193,6 +197,7 @@ bool show(Dlg* d) {
 }  // namespace
 
 bool active() { return g_active.load() > 0; }
+u32 released_count() { return g_released.load(); }
 
 bool shown() {
   std::lock_guard lk(g_dmu);

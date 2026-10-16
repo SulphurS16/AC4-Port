@@ -112,7 +112,7 @@ if(AC4_GEN_SRC)
   target_include_directories(ac4_spu_gen PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_compile_options(ac4_spu_gen PRIVATE -O2 ${AC4_CPU_FLAGS} -fno-strict-aliasing -w)
 
-  add_executable(ac4 ${AC4_RT_SRC} ${AC4_UTF8_RC})
+  add_executable(ac4 ${AC4_RT_SRC} ${AC4_UTF8_RC} src/runtime/game.rc)
   if(NOT AC4_DEV)  # players' builds open no console window (the run log holds every message)
     set_target_properties(ac4 PROPERTIES WIN32_EXECUTABLE ON)
   endif()

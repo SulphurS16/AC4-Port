@@ -38,6 +38,9 @@ bool text_input(const std::string& prompt, const std::u16string& initial, u32 ma
 void abort();
 // A dialog is open (the pad is held by the system).
 bool active();
+// How many dialogs have given the controller back so far: the game clears its own pad data while
+// the system holds the controller, so cellPadGetData reports in full after each (sys_io.cpp).
+u32 released_count();
 
 // The dialog on screen (window thread: the window procedure routes the input here while one is
 // shown). Keys and typed characters, the mouse in client pixels, the controller once per pass of

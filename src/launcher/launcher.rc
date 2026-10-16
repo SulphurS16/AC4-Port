@@ -10,6 +10,9 @@
 
 1 RT_MANIFEST "launcher.manifest"
 
+// The port's icon (data/ac4.ico: 16, 32 and 48 px): the file's icon and the window's.
+1 ICON "../../data/ac4.ico"
+
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION AC4_VERSION_MAJOR,AC4_VERSION_MINOR,AC4_VERSION_PATCH,0
 PRODUCTVERSION AC4_VERSION_MAJOR,AC4_VERSION_MINOR,AC4_VERSION_PATCH,0
