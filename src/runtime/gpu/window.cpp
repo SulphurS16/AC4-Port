@@ -137,6 +137,27 @@ HCURSOR make_menu_cursor(UINT dpi) {
 // (until a key or a controller takes over) and in PC SETTINGS; the arrow in gameplay after F1 gave
 // the mouse back; none otherwise, in every window mode: mouse look, the title, movies, cutscenes,
 // loading screens, a menu driven by keys or a controller.
+// The numpad's keys arrive as navigation keys while Num Lock is off (Num8 as Up, Num5 as Clear),
+// without the extended-key flag the separate arrow and editing keys carry: for the game's bindings
+// they are the numpad's keys whatever the Num Lock state (the camera keys Num8 / Num4 / Num5 / Num6).
+u32 game_key(WPARAM vk, LPARAM lp) {
+  if (lp & (1 << 24)) return u32(vk);
+  switch (vk) {
+    case VK_INSERT: return VK_NUMPAD0;
+    case VK_END: return VK_NUMPAD1;
+    case VK_DOWN: return VK_NUMPAD2;
+    case VK_NEXT: return VK_NUMPAD3;
+    case VK_LEFT: return VK_NUMPAD4;
+    case VK_CLEAR: return VK_NUMPAD5;
+    case VK_RIGHT: return VK_NUMPAD6;
+    case VK_HOME: return VK_NUMPAD7;
+    case VK_UP: return VK_NUMPAD8;
+    case VK_PRIOR: return VK_NUMPAD9;
+    case VK_DELETE: return VK_DECIMAL;
+    default: return u32(vk);
+  }
+}
+
 HCURSOR client_cursor() {
   if (g_mouse_captured && !input_isolated()) return nullptr;
   bool menu = sysdlg::shown() ? sysdlg::cursor_wanted() : game::menu_cursor_visible() || ui::is_open();
@@ -179,8 +200,9 @@ void set_fullscreen(bool on) {
     if (!GetWindowPlacement(g_hwnd, &g_windowed_placement) || !GetMonitorInfoW(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), &mi))
       return;
     SetWindowLongW(g_hwnd, GWL_STYLE, LONG((style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP));
+    const UINT test = input_isolated() || cfg().no_activate ? SWP_NOACTIVATE : 0;  // test runs never take the focus
     SetWindowPos(g_hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
-                 mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+                 mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED | test);
   } else {
     SetWindowLongW(g_hwnd, GWL_STYLE, LONG((style & ~WS_POPUP) | WS_OVERLAPPEDWINDOW));
     SetWindowPlacement(g_hwnd, &g_windowed_placement);
@@ -274,7 +296,9 @@ void set_client_size(int w, int h) {
     g_windowed_placement.showCmd = SW_SHOWNORMAL;
     return;
   }
-  ShowWindow(g_hwnd, SW_SHOWNORMAL);
+  // A maximized or minimized window is restored first. Not shown here: showing activates, and the
+  // window's first show (window_create) decides that (test runs never take the focus).
+  if (IsZoomed(g_hwnd) || IsIconic(g_hwnd)) ShowWindow(g_hwnd, SW_RESTORE);
   SetWindowPos(g_hwnd, nullptr, x, y, w + fw, h + fh, SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
   if (g_mouse_captured) clip_cursor();
 }
@@ -465,13 +489,13 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         ui::on_key(u32(wp), true, repeat);
         return 0;  // keys pressed in PC SETTINGS never reach the game
       }
-      input_key(u32(wp), true);
+      input_key(game_key(wp, lp), true);
       if (msg == WM_SYSKEYDOWN && wp != VK_F10 && wp != VK_MENU) break;  // Alt+F4 and the like
       return 0;
     }
     case WM_KEYUP:
     case WM_SYSKEYUP:
-      input_key(u32(wp), false);  // releases always reach the key state (no stuck keys)
+      input_key(game_key(wp, lp), false);  // releases always reach the key state (no stuck keys)
       if (overlay && !dialog) ui::on_key(u32(wp), false, false);
       if (msg == WM_SYSKEYUP && wp != VK_F10 && wp != VK_MENU) break;
       return 0;

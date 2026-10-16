@@ -31,63 +31,85 @@ void publish(u32 pad, u32 port_offset, u32 sticks_offset) {
   rt::datawatch::set_base("sticks", pad + sticks_offset);
 }
 
-// ---- Mouse look ----
+// ---- Mouse camera ----
 // The player's operator (0xb52584) maps the pad through the input layer (0xb5006c: dead zone and
 // curve; stick 0.569 -> 0.205 turn) and hands the AC's commands to its view object through
 // virtual setters: slot 6 (0xb6b148) turn, slot 9 (0xb67970, a thunk to slot 8) look pitch, the
 // latter negated first when the game's vertical inversion option is set. A setter stores the value
-// only while the view's flags allow it (view +16 -> word & 2 for turn, & 4 for pitch). The game
-// then smooths the stick: the AC's yaw rate and the look control's pitch velocity follow the
-// command through drag.
+// only while the view's flags allow it (view +16 -> word & 2 for turn, & 4 for pitch). The turn
+// command turns the AC body (its yaw rate follows the command through drag); the camera stands
+// behind the body and pitches with the AC's look control (0xa372e8).
 //
-// The mouse does not go that way: raw counts become angles (kRadPerCount per count times the
-// sensitivity; no smoothing, acceleration or dead zone), and each frame the AC turns, and the view
-// pitches, by the mouse's angle directly, at most at the speed of the stick fully pushed. Movement
-// beyond that speed waits as a pending angle and follows at full speed in the next frames, so the
-// AC turns until it points where the mouse points and no movement is lost. The pending angle is
-// dropped only where the stick would be ignored too (the view's flags, menus and pauses, a gap of
-// more than 0.25 s), during a view reset, and against a pitch limit (no dead zone on the way back).
-//   Turn: an AC body turns by its yaw rate (body +484, radians per 1/60 s step), which the game
-// updates once per frame from the frame's turn input (0xb656b8: turn object +28 through the drag
-// +36). After that update the mouse's share of the frame is added to the rate, and taken off again
-// before the next update, so the stick's own dynamics never see it. Full speed is what the stick
-// fully pushed reaches: rate factor +112 times the AC's turn speed for the direction (its part data
-// r32(+120) +284 / +288, chosen as 0xa10260 does) over the TOC constant at -16300, over the drag.
-//   Pitch: the look control's pitch angle (+48) gets the mouse's step after its update; full speed
-// max speed (+72) over drag (+76) per step; limits +80 (up) / +84 (down); mode +68 is 1 while a view
-// reset recentres it.
+// The mouse moves the camera, not the AC (user decision 2026-10-16): raw counts become angles
+// (kRadPerCount per count times the sensitivity; no smoothing, acceleration or dead zone) that
+// turn and pitch the camera at once, however fast the mouse moves. The AC then turns toward where
+// the camera looks by the game's own turning: the turn command it gets is the stick's, fully
+// pushed while the camera is more than kChaseFull away and proportionally less within, so it
+// turns at its own speed and stops where the camera points. The game still places the camera
+// (distance, framing, collision): the look control has a yaw block beside its pitch block,
+// look +4, the camera's yaw relative to the body (radians, right positive), which the game holds
+// at 0 (its limits +36 / +40 are 0); written after the look control's update, it turns the
+// camera around the AC (radar cone included). The camera uses the body's heading from before the
+// frame's physics, so the camera's angle to the body is taken against the heading at the frame's
+// start and the camera shows the mouse's heading exactly while the AC turns under it.
+//   Other turning stays the game's: the stick or turn keys turn the AC with the camera at its
+// angle; once the AC points where the camera does and the mouse rests, the camera is behind it
+// again and follows whatever turns it (auto-sighting, scripts). Where the view takes no turn
+// (scripted moments) or during a view reset the camera goes back behind the AC.
+//   Pitch: the look control's pitch angle (+48) gets the mouse's angle after its update, within
+// its limits +80 (up) / +84 (down); mode +68 is 1 while a view reset recentres it.
 constexpr u32 kPlayerTurnSetReturn = 0x00b52708;                          // operator: slot 6 call
 constexpr u32 kPlayerPitchSetReturns[] = {0x00b52800, 0x00b52c30};       // slot 9: inverted / normal
-constexpr double kRadPerCount = 3.14159265358979323846 / 2000;           // 0.09 degrees: 1000 counts turn 90
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kRadPerCount = kPi / 2000;  // 0.09 degrees: 1000 counts turn 90
 // Sign of the pitch that looks down (mouse moved toward the user: positive raw Y counts).
 constexpr double kPitchDownSign = -1.0;
-// The AC's look control (0xa372e8: r3 control, r4 its input, f1 frame time) turns (0xa36c6c),
-// then reads the pitch command (getter 0xb67cd4: the input's state +48) and integrates it
-// (0xa36684, state at control + 48): angle +0 (radians, up positive), velocity +4, accumulator +8,
-// mode +20 (1 while a view reset recentres), max speed +24, drag +28, limits +32 (upper) and +36
-// (lower); the velocity is zeroed at a limit. Every input class reads its state through slot 2;
-// the player's input object holds the state the player's view writes at +12.
+// The AC's look control (0xa372e8: r3 control, r4 its input, f1 frame time) turns (0xa36c6c: the
+// yaw block at +4), then reads the pitch command (getter 0xb67cd4: the input's state +48) and
+// integrates it (0xa36684, state at control + 48): angle +0 (radians, up positive), velocity +4,
+// accumulator +8, mode +20 (1 while a view reset recentres), max speed +24, drag +28, limits +32
+// (upper) and +36 (lower); the velocity is zeroed at a limit. Every input class reads its state
+// through slot 2; the player's input object holds the state the player's view writes at +12.
+constexpr u32 kLookYaw = 4;
 constexpr u32 kPitchState = 48;
-constexpr u32 kYawRate = 484;  // an AC body's yaw rate (body = turn object +4)
+constexpr u32 kYawRate = 484;       // an AC body's yaw rate (body = turn object +4; dev trace)
+constexpr u32 kBodyForward = 432;   // an AC body's rotation row 2: x +432, z +440; heading atan2(x, z), right turns add
+constexpr double kChaseFull = 8.0 * kPi / 180;  // the camera further than this from the AC's heading: full turn command
+constexpr double kSettled = 0.2 * kPi / 180;    // nearer, with the mouse at rest: the AC points where the camera does
+constexpr double kStickTurn = 0.05;             // a turn command from the stick or the turn keys
+// The tutorial's steps count an input that lasts 0.5 s without a gap (its monitor 0xb69658: per
+// input a hold time of 0.5 s, a release time of 1/12 s). A mouse movement counts as such an input
+// from its start until kTutorialHold after its end (pitch: the operator's "pitch input" flag; turn:
+// a command of kTutorialTurn when the AC is not turning already, too small to turn it).
+constexpr double kTutorialHold = 0.6;
+constexpr double kTutorialTurn = 1e-4;
 
-// The mouse's pending angles and this frame's facts (the game's main thread: the operator, the look
-// control and the AC update all run there, in that order).
-struct MouseLook {
-  double turn = 0, pitch = 0;           // radians still to apply (turn: the stick's positive direction; pitch: up)
-  bool turned = false, pitched = false;  // the mouse moved this frame (the tutorial's steps)
-  int turn_dir = 0;                     // this frame's turn direction (sign)
+// The camera's state (the game's main thread: the operator, the look control and the AC update all
+// run there, in that order).
+struct MouseCam {
+  u32 body = 0;            // the player's AC body the headings belong to
+  double target = 0;       // where the camera looks: a heading in the body's convention (radians)
+  double heading = 0;      // the body's heading at this frame's start
+  double offset = 0;       // target - heading: the camera's yaw relative to the AC (look +4 this frame)
+  double pitch = 0;        // this frame's mouse pitch (radians, up positive)
+  double command = 0;      // the turn command the AC got this frame (dev trace)
+  double now = 0;          // this frame's time (seconds)
+  double turned_at = -1e9, pitched_at = -1e9;  // the mouse's last movement in each axis (the tutorial's steps)
+  int turn_dir = 0;        // the direction of the last mouse turn
+  bool fresh = false;      // set by the operator's turn call; the look update writes the frame's camera
+  bool turning() const { return now - turned_at < kTutorialHold; }
+  bool pitching() const { return now - pitched_at < kTutorialHold; }
 };
-MouseLook g_ml;
+MouseCam g_cam;
 LARGE_INTEGER g_last_frame{};
 std::atomic<u64> g_turn_calls{0}, g_pitch_calls{0};
 std::atomic<int> g_look_trace{0};    // dev: frames of the player's look control still to log (turn_trace)
+std::atomic<int> g_lookset_off{-1};  // dev: a float written at look +offset after every update (look_set)
+std::atomic<float> g_lookset_val{0};
 std::atomic<u32> g_heading_probe[4];  // dev: (sin, cos) pairs of heading matrices (turn_trace; up to four)
 std::atomic<u32> g_player_state{0};  // the player's view state (view +12), written by the operator
 std::atomic<u32> g_look{0};          // the player AC's look control
 std::atomic<u32> g_player_turn{0};   // the player AC's turn object
-float g_turn_added = 0;              // the yaw rate the mouse added this frame (taken off before the next update)
-u32 g_turn_added_body = 0;
-float g_turn_drag = 0;               // the last drag seen (+36 of a frame with turn input)
 
 float f32_of_bits(u32 bits) {
   float f;
@@ -101,14 +123,27 @@ void wf(u32 ea, float v) {
   w32(ea, bits);
 }
 
+double wrap(double a) { return std::remainder(a, 2 * kPi); }  // into [-pi, pi]
+
 bool view_allows(u32 view, u32 mask) {
   u32 flags = view ? r32(view + 16) : 0;
   return flags && rt::vm::committed(flags, 4) && (r32(flags) & mask) != 0;
 }
 
+// The heading of an AC body (radians; turning right adds), from its rotation.
+bool heading_of(u32 body, double* h) {
+  if (!body || !rt::vm::committed(body + kBodyForward, 12)) return false;
+  double x = rf(body + kBodyForward), z = rf(body + kBodyForward + 8);
+  if (!(x * x + z * z > 0.25)) return false;  // not a rotation (and not NaN)
+  *h = std::atan2(x, z);
+  return true;
+}
+
 // Once per game frame, from the operator's turn call (before the pitch call, the look control and
-// the AC's update): the mouse movement since the previous frame joins the pending angles.
-void mouse_look_frame(u32 view) {
+// the AC's update; f1 the turn command from the stick and the turn keys): the mouse's movement
+// since the previous frame turns the camera, and the AC gets the command that turns it toward the
+// camera.
+void mouse_cam_frame(Ctx& ctx, u32 view) {
   LARGE_INTEGER now, freq;
   QueryPerformanceCounter(&now);
   QueryPerformanceFrequency(&freq);
@@ -116,24 +151,77 @@ void mouse_look_frame(u32 view) {
   g_last_frame = now;
   s64 dx = 0, dy = 0;
   rt::input_mouse_take(&dx, &dy);
-  const rt::bindings::MouseSettings& m = rt::bindings::mouse();
-  static int traced = 0;  // diagnostics: the first frames with mouse movement
-  if (dt <= 0 || dt > 0.25) {  // menus, a pause, a hitch: nothing gathered meanwhile turns the AC
-    if ((dx || dy || g_ml.turn || g_ml.pitch) && traced++ < 60)
-      LOG_I("input", "mouse look: %lld, %lld counts dropped (%.0f ms since the previous frame)", (long long)dx, (long long)dy, dt * 1000);
-    g_ml = MouseLook{};
+  u32 turn = g_player_turn.load(std::memory_order_relaxed);
+  u32 body = turn && rt::vm::committed(turn + 4, 4) ? r32(turn + 4) : 0;
+  double h = 0;
+  if (!heading_of(body, &h)) {
+    g_cam = MouseCam{};
     return;
   }
-  double t = double(m.invert_x ? -dx : dx) * m.sensitivity_x * kRadPerCount;
-  double p = double(m.invert_y ? -dy : dy) * m.sensitivity_y * kRadPerCount * kPitchDownSign;
-  g_ml.turned = t != 0;
-  g_ml.pitched = p != 0;
-  g_ml.turn_dir = t > 0 ? 1 : t < 0 ? -1 : 0;
-  g_ml.turn = view_allows(view, 2) ? g_ml.turn + t : 0;  // where the view takes no turn the stick turns nothing either
-  g_ml.pitch = view_allows(view, 4) ? g_ml.pitch + p : 0;
-  if ((dx || dy) && traced++ < 60)
-    LOG_I("input", "mouse look: %lld, %lld counts over %.1f ms -> pending turn %.4f, pitch %.4f rad", (long long)dx, (long long)dy, dt * 1000,
-          g_ml.turn, g_ml.pitch);
+  if (body != g_cam.body) {  // a new AC (a mission, AC TEST, the tutorial's next part): the camera behind it
+    g_cam = MouseCam{};
+    g_cam.body = body;
+    g_cam.target = g_cam.heading = h;
+  }
+  double turned_by = wrap(h - g_cam.heading);  // the AC's turn since the previous frame
+  g_cam.heading = h;
+  // Menus, a pause, a hitch: what the mouse did meanwhile moves nothing.
+  bool gap = dt <= 0 || dt > 0.25;
+  const rt::bindings::MouseSettings& m = rt::bindings::mouse();
+  double t = gap ? 0 : double(m.invert_x ? -dx : dx) * m.sensitivity_x * kRadPerCount;
+  double p = gap ? 0 : double(m.invert_y ? -dy : dy) * m.sensitivity_y * kRadPerCount * kPitchDownSign;
+  static int traced = 0;  // diagnostics: the first frames with mouse movement
+  if ((dx || dy) && traced++ < 40)
+    LOG_I("input", "mouse camera: %lld, %lld counts over %.1f ms%s", (long long)dx, (long long)dy, dt * 1000, gap ? " (dropped)" : "");
+  u32 look = g_look.load(std::memory_order_relaxed);
+  bool recentring = look && rt::vm::committed(look + kPitchState + 20, 4) && r32(look + kPitchState + 20) == 1;
+  double stick = ctx.f[1];
+  bool stick_turns = std::fabs(stick) > kStickTurn;
+  // A heading change faster than an AC turns (about 0.03 rad per 1/60 s step at full speed; twice
+  // that allowed) is the game setting it (a start position, a scripted turn), as is any change
+  // over a gap.
+  double steps = std::min(dt, 0.25) * 60;
+  bool set_by_game = gap || std::fabs(turned_by) > std::max(0.07 * steps, 0.05);
+  if (!view_allows(view, 2) || recentring) {
+    g_cam.target = h;  // no turning here (or a view reset): the camera behind the AC
+    t = 0;
+  } else if (stick_turns || set_by_game) {
+    g_cam.target += turned_by;  // the stick turns the AC, or the game set its heading: the camera keeps its angle to it
+  }
+  g_cam.target = wrap(g_cam.target + t);
+  double o = wrap(g_cam.target - h);
+  if (t == 0 && std::fabs(o) < kSettled) {  // caught up and the mouse at rest: the camera follows the AC again
+    g_cam.target = h;
+    o = 0;
+  }
+  g_cam.offset = o;
+  g_cam.command = stick;
+  if (o != 0 && !stick_turns) {  // the AC turns toward the camera as with the stick
+    g_cam.command = std::clamp(o / kChaseFull, -1.0, 1.0);
+    ctx.f[1] = g_cam.command;
+  }
+  g_cam.pitch = view_allows(view, 4) && !recentring ? p : 0;
+  g_cam.now = double(now.QuadPart) / double(freq.QuadPart);
+  if (t != 0) {
+    g_cam.turned_at = g_cam.now;
+    g_cam.turn_dir = t > 0 ? 1 : -1;
+  }
+  if (p != 0 && view_allows(view, 4)) g_cam.pitched_at = g_cam.now;
+  g_cam.fresh = true;
+}
+
+// After the player's look control updated: the frame's camera (its yaw against the AC, the mouse's
+// pitch within the limits). Nothing when the operator did not run this frame (cutscenes, menus).
+void mouse_cam_apply(u32 look) {
+  if (!g_cam.fresh) return;
+  g_cam.fresh = false;
+  if (rt::vm::committed(look + kLookYaw, 4)) wf(look + kLookYaw, float(g_cam.offset));
+  u32 p = look + kPitchState;
+  if (g_cam.pitch != 0 && rt::vm::committed(p, 40)) {
+    double hi = rf(p + 32), lo = rf(p + 36);
+    if (lo < hi) wf(p, float(std::clamp(double(rf(p)) + g_cam.pitch, lo, hi)));
+  }
+  g_cam.pitch = 0;
 }
 
 // The operator's turn call (slot 6) of the player: the player's view state, then the mouse.
@@ -143,33 +231,11 @@ void player_turn_call(Ctx& ctx) {
   if (view && rt::vm::committed(view + 12, 4)) {
     u32 state = r32(view + 12);
     if (g_player_state.exchange(state) != state) {
-      LOG_I("input", "mouse look: player view 0x%08x, state 0x%08x", view, state);
+      LOG_I("input", "mouse camera: player view 0x%08x, state 0x%08x", view, state);
       rt::datawatch::set_base("state", state);  // --watch-access state+OFFSET (turn command +32, pitch +48)
     }
   }
-  mouse_look_frame(view);
-}
-
-// The steady yaw rate of the stick fully pushed in a direction (radians per step), from the turn
-// object's data as the game computes the stick's turn (0xb5a4f4 -> 0xa10260, 0xb64528); 0 if not
-// known yet. toc: r2 of the AC update code (0xb656b8 and 0xb5a4f4 share it); 0xa10260 runs with
-// r2 61892 lower (0x9a7700 adds it, 0xaf55a0 takes it off).
-double full_turn_rate(u32 toc, u32 obj, int dir) {
-  u32 part = r32(obj + 120), toc_a = toc - 61892;
-  if (!part || !rt::vm::committed(part + 284, 8) || !rt::vm::committed(toc - 16300, 4) || !rt::vm::committed(toc_a - 15976, 52)) return 0;
-  float c = rf(toc - 16300), c1 = rf(toc_a - 15956), c2 = rf(toc_a - 15976), c3 = rf(toc_a - 15928);
-  static bool logged = false;
-  if (!logged) {
-    logged = true;
-    LOG_I("input", "mouse look: turn speeds %g (+284) / %g (+288), factor %g, scale %g, full commands %g / %g, mean %g, drag %g", double(rf(part + 284)),
-          double(rf(part + 288)), double(rf(obj + 112)), double(c), double(c1), double(c2), double(c3), double(rf(obj + 36)));
-  }
-  float cmd = dir > 0 ? 1.0f : -1.0f;
-  float speed = cmd == c1 ? rf(part + 284) : cmd == c2 ? rf(part + 288) : (rf(part + 284) + rf(part + 288)) * c3;
-  float drag = rf(obj + 36);
-  if (drag > 0) g_turn_drag = drag;
-  if (g_turn_drag <= 0 || c == 0) return 0;
-  return std::fabs(double(rf(obj + 112)) * double(speed) / double(c) / double(g_turn_drag));
+  mouse_cam_frame(ctx, view);
 }
 
 }  // namespace
@@ -190,39 +256,41 @@ void hook_pad_update_b(Ctx& ctx, void (*orig)(Ctx&)) {
   publish(pad, 736, 1524);
 }
 
-// View slot 6 (0xb6b148: r3 view, f1 turn command): the stick's command goes on unchanged; from the
-// player's operator, the frame's mouse movement is gathered (it turns the AC in ac_turn_update).
+// View slot 6 (0xb6b148: r3 view, f1 turn command): from the player's operator, the mouse camera's
+// frame, which may replace the command with the one that turns the AC toward the camera.
 void hook_view_turn_set(Ctx& ctx, void (*orig)(Ctx&)) {
   if (u32(ctx.lr) == kPlayerTurnSetReturn) player_turn_call(ctx);
   orig(ctx);
 }
 
 // The tutorial's view class (vtable 0x10148768) has its own slot 6 (0xb6acf4): the same store, plus
-// a flag its steps count ("turn 3 times") when the command is not zero. A mouse turn sets it with a
-// command too small to turn the AC (1/10000 of the stick's), so the step counts the mouse too.
+// a flag its steps count ("turn 3 times") when the command is not zero. The AC turning toward the
+// camera counts as the stick does; after a mouse turn the AC may stop sooner than the step needs,
+// so the turn input goes on (kTutorialTurn) until kTutorialHold after the mouse rested.
 void hook_view_turn_set_b(Ctx& ctx, void (*orig)(Ctx&)) {
   if (u32(ctx.lr) == kPlayerTurnSetReturn) {
     player_turn_call(ctx);
-    if (g_ml.turned && ctx.f[1] == 0) ctx.f[1] = g_ml.turn_dir > 0 ? 1e-4 : -1e-4;
+    if (std::fabs(ctx.f[1]) < kTutorialTurn && g_cam.turning()) ctx.f[1] = g_cam.turn_dir * kTutorialTurn;
   }
   orig(ctx);
 }
 
 // View slot 9 (0xb67970, a thunk to slot 8: r3 view, f1 pitch command, r5 the operator's "pitch
 // input" flag): the stick's command goes on unchanged. The tutorial view's slot 8 (0xb6ae5c) marks
-// its "adjust view" steps on that flag: a mouse pitch raises it (slot 8 of the other views ignores it).
+// its "adjust view" input on that flag (r32(view +24) +72; slot 8 of the other views ignores it): a
+// mouse look raises it from its start until kTutorialHold after the mouse rested.
 void hook_view_pitch_set(Ctx& ctx, void (*orig)(Ctx&)) {
   u32 lr = u32(ctx.lr);
   if (lr == kPlayerPitchSetReturns[0] || lr == kPlayerPitchSetReturns[1]) {
     g_pitch_calls.fetch_add(1, std::memory_order_relaxed);
-    if (g_ml.pitched) ctx.r[5] = 1;
+    if (g_cam.pitching()) ctx.r[5] = 1;
   }
   orig(ctx);
 }
 
 // 0x9fc210 (every frame) and 0x9fc364 (while there is turn input): r3 an AC's controller, r4 its
 // input. The player's (its input holds the player's view state) gives the player's turn object,
-// r32(r32(r32(controller +4) +152) +260).
+// r32(r32(r32(controller +4) +152) +260); its +4 is the AC body.
 void note_turn_input(Ctx& ctx) {
   u32 ctl = u32(ctx.r[3]), input = u32(ctx.r[4]);
   u32 state = g_player_state.load(std::memory_order_relaxed);
@@ -232,7 +300,7 @@ void note_turn_input(Ctx& ctx) {
   u32 b = r32(a + 152);
   if (!b || !rt::vm::committed(b + 260, 4)) return;
   u32 obj = r32(b + 260);
-  if (g_player_turn.exchange(obj) != obj) LOG_I("input", "mouse look: player turn object 0x%08x", obj);
+  if (g_player_turn.exchange(obj) != obj) LOG_I("input", "mouse camera: player turn object 0x%08x", obj);
 }
 void hook_ac_turn_input(Ctx& ctx, void (*orig)(Ctx&)) {
   note_turn_input(ctx);
@@ -243,61 +311,8 @@ void hook_ac_turn_input_b(Ctx& ctx, void (*orig)(Ctx&)) {
   orig(ctx);
 }
 
-// 0xb656b8 (r3 an AC's turn object): the AC body's yaw rate from the frame's turn input. For the
-// player's: the mouse's share of the last frame comes off first (the game's update sees the stick's
-// rate only), then this frame's share goes on: the pending angle, at most at full speed (with the
-// stick, the two together stay within it).
-void hook_ac_turn_update(Ctx& ctx, void (*orig)(Ctx&)) {
-  u32 obj = u32(ctx.r[3]);
-  if (!obj || obj != g_player_turn.load(std::memory_order_relaxed) || !rt::vm::committed(obj, 128)) {
-    orig(ctx);
-    return;
-  }
-  u32 body = r32(obj + 4);
-  if (!body || !rt::vm::committed(body + kYawRate, 4)) {
-    orig(ctx);
-    return;
-  }
-  u32 toc = u32(ctx.r[2]);
-  if (g_turn_added != 0 && g_turn_added_body == body) wf(body + kYawRate, rf(body + kYawRate) - g_turn_added);
-  g_turn_added = 0;
-  orig(ctx);
-  double steps = double(rf(obj + 8)) * 60;  // the frame's time in 1/60 s steps
-  if (g_ml.turn == 0 || steps <= 0 || steps > 15) return;
-  double full = full_turn_rate(toc, obj, g_ml.turn > 0 ? 1 : -1);
-  if (full <= 0) return;
-  double rate = rf(body + kYawRate);
-  double add = std::clamp(g_ml.turn / steps, std::min(0.0, -full - rate), std::max(0.0, full - rate));
-  wf(body + kYawRate, float(rate + add));
-  g_turn_added = float(add);
-  g_turn_added_body = body;
-  g_ml.turn -= add * steps;
-  if (std::fabs(g_ml.turn) < 1e-7) g_ml.turn = 0;
-}
-
-namespace {
-// The mouse's pitch step after the player's look control updated the angle from the stick: the
-// pending angle, at most at full speed, within the limits (the rest toward a limit is dropped).
-void mouse_pitch_step(u32 look, double dt) {
-  u32 p = look + kPitchState;
-  if (g_ml.pitch == 0 || !rt::vm::committed(p, 40)) return;
-  if (r32(p + 20) == 1) {  // a view reset recentres the view: the mouse waits
-    g_ml.pitch = 0;
-    return;
-  }
-  double steps = dt * 60, maxs = rf(p + 24), drag = rf(p + 28), hi = rf(p + 32), lo = rf(p + 36);
-  if (steps <= 0 || steps > 15 || maxs <= 0 || drag <= 0 || lo >= hi) return;
-  double full = maxs / drag * steps;
-  double step = std::clamp(g_ml.pitch, -full, full);
-  double angle = rf(p), next = std::clamp(angle + step, lo, hi);
-  wf(p, float(next));
-  g_ml.pitch -= step;
-  if ((g_ml.pitch > 0 && next >= hi) || (g_ml.pitch < 0 && next <= lo) || std::fabs(g_ml.pitch) < 1e-7) g_ml.pitch = 0;
-}
-}  // namespace
-
 // The AC's look control (0xa372e8: r3 control, r4 input, f1 frame time). For the player's (its
-// input holds the player's view state at +12): the mouse's pitch step after the update.
+// input holds the player's view state at +12): the mouse camera after the update.
 void hook_look_update(Ctx& ctx, void (*orig)(Ctx&)) {
   u32 look = u32(ctx.r[3]), input = u32(ctx.r[4]);
   u32 state = g_player_state.load(std::memory_order_relaxed);
@@ -308,7 +323,8 @@ void hook_look_update(Ctx& ctx, void (*orig)(Ctx&)) {
   }
   double dt = ctx.f[1];
   if (g_look.exchange(look) != look) {
-    LOG_I("input", "mouse look: player look control 0x%08x (input 0x%08x), pitch state at 0x%08x", look, input, look + kPitchState);
+    LOG_I("input", "mouse camera: player look control 0x%08x (input 0x%08x), camera yaw at 0x%08x, pitch at 0x%08x", look, input, look + kLookYaw,
+          look + kPitchState);
     rt::datawatch::set_base("look", look);  // --watch-access look+OFFSET
   }
   // Diagnostics: the frame time the game hands its simulation (f1), summarized every 5 s.
@@ -326,7 +342,7 @@ void hook_look_update(Ctx& ctx, void (*orig)(Ctx&)) {
     sum = 0, lo = 1e9, hi = 0, n = 0, since = now;
   }
   orig(ctx);
-  mouse_pitch_step(look, dt);
+  mouse_cam_apply(look);
 }
 
 }  // namespace ppu

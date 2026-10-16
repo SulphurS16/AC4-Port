@@ -1,6 +1,7 @@
 #include "common/settings_file.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -56,40 +57,52 @@ const char* const kKeyboardHead =
     "#   Alt, Up, Down, Left, Right, Home, End, PageUp, PageDown, Insert, Delete, CapsLock, Mouse1\n"
     "#   (left), Mouse2 (right), Mouse3 (middle), Mouse4, Mouse5, WheelUp, WheelDown\n"
     "# Mouse buttons and the wheel count while the game window has the mouse (click into it). The\n"
-    "# defaults follow the game's control TYPE A; the mouse turns and looks.\n";
+    "# mouse moves the camera in missions and the AC turns after it.\n";
 
 const char* const kKeyboardDefaults =
-    "# The game's control TYPE A (SYSTEM > CONTROL OPTIONS > KEY CONFIGURATION).\n"
+    "# What the controls do follows the game's control TYPE A (SYSTEM > CONTROL OPTIONS > KEY\n"
+    "# CONFIGURATION).\n"
     "# MOVE (left stick)\n"
     "lstick_up = W\n"
     "lstick_down = S\n"
     "lstick_left = A\n"
     "lstick_right = D\n"
-    "# SIGHT (right stick: turn, look up and down; R3 resets the view); the mouse turns and looks\n"
-    "rstick_up = Num8\n"
-    "rstick_down = Num5, Num2\n"
-    "rstick_left = Num4\n"
-    "rstick_right = Num6\n"
-    "r3 = C\n"
+    "# SIGHT (right stick: turn, look up and down) from the keys; the mouse moves the camera\n"
+    "rstick_up = I, Num8\n"
+    "rstick_down = K, Num5\n"
+    "rstick_left = J, Num4\n"
+    "rstick_right = L, Num6\n"
+    "# R3: reset view\n"
+    "r3 = V\n"
     "# BOOST: boost (hold to rise), quick boost, over boost\n"
     "l2 = Space\n"
     "r2 = Shift\n"
-    "triangle = E\n"
-    "# WEAPON: right arm, left arm, shoulder; switch right / left arm weapon (hold: reload)\n"
-    "cross = Mouse1, Enter\n"
-    "square = Mouse2\n"
-    "circle = F, Mouse3, Backspace\n"
-    "r1 = R, WheelUp\n"
-    "l1 = Q, WheelDown\n"
-    "# LOCK: lock on target (hold to switch the lock mode)\n"
-    "l3 = Ctrl, Mouse4\n"
-    "# Pause, Select, D-pad\n"
-    "start = Escape\n"
-    "select = Tab\n"
+    "triangle = Ctrl\n"
+    "# WEAPON: left arm (Square), right arm (Cross), shoulder (Circle); switch left / right arm\n"
+    "# weapon (L1 / R1; hold: reload)\n"
+    "square = Mouse1\n"
+    "cross = Mouse2\n"
+    "circle = C\n"
+    "l1 = Q\n"
+    "r1 = E\n"
+    "# LOCK: lock on target (L3; hold to switch the lock mode)\n"
+    "l3 = Mouse3\n"
+    "# START (pause), SELECT, D-pad\n"
+    "start = Tab, Escape\n"
+    "select = Enter\n"
     "up = Up\n"
     "down = Down\n"
     "left = Left\n"
     "right = Right\n";
+
+// The defaults of 0.1 and 0.2: a file whose bindings are still exactly these takes the defaults
+// above (bindings the player changed stay).
+const char* const kOldKeyboardDefaults =
+    "lstick_up = W\nlstick_down = S\nlstick_left = A\nlstick_right = D\n"
+    "rstick_up = Num8\nrstick_down = Num5, Num2\nrstick_left = Num4\nrstick_right = Num6\nr3 = C\n"
+    "l2 = Space\nr2 = Shift\ntriangle = E\ncross = Mouse1, Enter\nsquare = Mouse2\ncircle = F, Mouse3, Backspace\n"
+    "r1 = R, WheelUp\nl1 = Q, WheelDown\nl3 = Ctrl, Mouse4\nstart = Escape\nselect = Tab\n"
+    "up = Up\ndown = Down\nleft = Left\nright = Right\n";
 
 const char* const kMenuHead =
     "[menu]\n"
@@ -110,13 +123,52 @@ const char* const kMenuDefaults =
     "l1 = Q\n"
     "r1 = E\n"
     "# The other buttons the game's menus use (GARAGE in the hub, FULL / SORT in SCHEMATICS, ...); keys\n"
-    "# not listed in this section keep their mission meaning in menus (Shift R2, Ctrl L3, C R3)\n"
+    "# not listed in this section keep their mission meaning in menus (Ctrl Triangle, C Circle, V R3)\n"
     "triangle = R\n"
     "square = F\n"
     "l2 = Z\n"
     "select = X\n";
 
 bool truthy(const std::string& v) { return v == "1" || v == "true" || v == "yes" || v == "on"; }
+
+// A section's bindings as comparable text: keys and values lower-case, spaces dropped, sorted.
+std::vector<std::string> bindings_of(const Ini& ini, const std::string& section) {
+  std::vector<std::string> out;
+  for (const auto& [k, v] : ini.entries(section)) {
+    std::string s = k + "=" + v;
+    s.erase(std::remove_if(s.begin(), s.end(), [](char c) { return c == ' ' || c == '\t'; }), s.end());
+    for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+    out.push_back(s);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+// The file's text with its [keyboard] section (header to the next section) replaced by `section`.
+std::string with_keyboard_section(const std::string& text, const std::string& section) {
+  std::string out;
+  bool skipping = false;
+  for (size_t a = 0; a < text.size();) {
+    size_t b = text.find('\n', a);
+    std::string line = text.substr(a, b == std::string::npos ? std::string::npos : b - a + 1);
+    a = b == std::string::npos ? text.size() : b + 1;
+    std::string t = line;
+    while (!t.empty() && (t.back() == '\n' || t.back() == '\r' || t.back() == ' ')) t.pop_back();
+    if (!t.empty() && t[0] == '[') {
+      std::string name = t;
+      for (char& c : name) c = char(std::tolower(static_cast<unsigned char>(c)));
+      if (name == "[keyboard]") {
+        out += section;
+        skipping = true;
+        continue;
+      }
+      if (skipping) out += "\n";
+      skipping = false;
+    }
+    if (!skipping) out += line;
+  }
+  return out;
+}
 
 }  // namespace
 
@@ -193,6 +245,12 @@ Ini load_or_create(const std::filesystem::path& file, std::vector<std::string>* 
     add_missing("display", kDisplay);
     add_missing("mouse", kMouse);
     add_missing("keyboard", std::string(kKeyboardHead) + kKeyboardDefaults);
+    // Bindings still at the defaults of 0.1 / 0.2: the current defaults (the section with its notes).
+    if (bindings_of(ini, "keyboard") == bindings_of(Ini::parse(std::string("[keyboard]\n") + kOldKeyboardDefaults), "keyboard")) {
+      ini = Ini::parse(with_keyboard_section(ini.text(), std::string(kKeyboardHead) + kKeyboardDefaults));
+      changed = true;
+      note("settings: keyboard bindings were the earlier defaults: now the current defaults");
+    }
     if (!ini.has_section("menu")) {  // files from before the menu keys: the section with its notes
       std::string head = kMenuHead;
       for (size_t a = head.find('\n') + 1; a < head.size();) {
