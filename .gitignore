@@ -1,0 +1,41 @@
+# Players' own game files, keys, prepared data, builds, saves and settings never belong here.
+/local/
+/Armored Core 4 (USA)/
+PS3_GAME/
+PS3_DISC.SFB
+/launcher.ini
+/AC4-Launcher.exe
+*.exe
+*.dll
+*.pkg
+*.PUP
+*.pup
+*.elf
+*.self
+*.sprx
+*.prx
+*.SFO
+*.SFB
+*.BIN
+*.pam
+*.bnd
+*.bdt
+*.bhd
+*.tpf
+*.drb
+*.fmg
+*.000
+*.001
+*.002
+*.003
+*.rap
+*.edat
+*keys*.txt
+*.zip
+
+# Editor / OS noise
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
