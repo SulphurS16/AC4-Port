@@ -11,7 +11,7 @@ Not affiliated with, endorsed or sponsored by FromSoftware, SEGA, Sony Interacti
 - Native, not emulated. The whole game runs as a 64-bit Windows program.
 - Resolution options. The game draws at your screen's own resolution, in borderless, windowed or fullscreen.
 - Render scale from 50% to 200%.
-- High frame rates. 30, 60, 120, 144, your monitor's refresh rate or uncapped and the same game speed at every frame rate.. Menus and movies stay at 60.
+- High frame rates. 30, 60, 120, 144, your monitor's refresh rate or uncapped and the same game speed at every frame rate. Menus and movies stay at 60.
 - Full mouse support. The mouse moves the camera with raw input. Your AC turns after it at its own speed, as with the stick.
 - PC SETTINGS inside the game. A row the port adds to the game's own SYSTEM menu: display, frame rate, mouse and keys settings all ingame.
 
@@ -105,7 +105,7 @@ All keys can be changed in game under **SYSTEM > PC SETTINGS**.
 - PS3 saves work once you have decrypted them. Copy each save folder (named 'BLUS30027...') into the savedata folder above.
 - RPCS3 saves should work as they are. Copy the same 'BLUS30027...' folders from RPCS3's savedata folder.
 
-Only saves from the US version (BLUS30027 are found.
+Only saves from the US version (BLUS30027) are found.
 
 ## Community
 
