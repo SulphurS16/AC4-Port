@@ -14,6 +14,7 @@
 #include <fstream>
 #include <thread>
 
+#include "ac4_version.h"  // AC4_VERSION (generated from VERSION)
 #include "common/file.h"
 #include "common/sfo.h"
 #include "runtime/bindings.h"

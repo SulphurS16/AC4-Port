@@ -16,7 +16,12 @@ add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00 NOMINMAX UNICODE _UNIC
 # by the game.
 file(STRINGS ${CMAKE_SOURCE_DIR}/VERSION AC4_VERSION LIMIT_COUNT 1)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/VERSION)
-add_compile_definitions(AC4_VERSION="${AC4_VERSION}")
+# In a generated header, written only when the version changes and included by the game's and the
+# launcher's main.cpp alone: a new version rebuilds those two files, not every file (a compile
+# definition on every file made each update rebuild the whole game).
+file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/version/ac4_version.h
+     CONTENT "// Generated from VERSION by CMakeLists.txt.\n#pragma once\n#define AC4_VERSION \"@AC4_VERSION@\"\n" @ONLY)
+include_directories(${CMAKE_BINARY_DIR}/version)
 
 # Developer diagnostics (control-file commands, profiler, memory search and watchpoints, traces,
 # frame reports, A/B switches, test autopilot). Off in player builds: compiled out, and the

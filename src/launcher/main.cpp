@@ -27,6 +27,7 @@
 #include <thread>
 
 #include "common/bytes.h"
+#include "ac4_version.h"  // AC4_VERSION (generated from VERSION)
 #include "common/ini.h"
 #include "common/settings_file.h"
 #include "launcher/inputs.h"
