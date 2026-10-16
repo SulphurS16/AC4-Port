@@ -38,7 +38,7 @@ Nothing from the game is in this repository. Everything game-derived is generate
 
 ### Steps
 
-1. Download `AC4-Port-<version>.zip` from [Releases](https://github.com/SulphurS16/AC4-Port/releases).
+1. Download `AC4-Port-<version>.zip` from [Releases](https://github.com/SulphurS16/AC4-Port/releases/latest).
 2. Right click the zip, choose **Extract All...**, and pick a folder with enough space, for example 'C:\Games\AC4-Port'.
 3. Open that folder and start 'AC4-Launcher.exe'.
 4. Under **Game folder**, choose the folder that contains 'PS3_GAME'.
