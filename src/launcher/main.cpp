@@ -57,7 +57,7 @@ enum Id {
   kPrepare = 140, kCancel, kProgress = 143, kStatus,
   kFps = 150, kMode, kResolution,
   kMore = 160,
-  kPlay = 170, kPlayState,
+  kPlay = 170,
   kLabel = 200,
   // the More menu
   kMenuScale = 300,    // + index into g_scale_items
@@ -544,8 +544,7 @@ void refresh_data_row() {
         : r == Risk::Cloud   ? L"In a cloud-synced folder (OneDrive): gigabytes to upload (Change...)."
                              : L"In a temporary folder, which Windows empties (Change...).";
   } else if (installed) {
-    s = g_data_counted ? L"Holds " + size_text(g_data_bytes) + L"; " + size_text(free_bytes(g_cfg.data)) + L" free on that drive."
-                       : L"Counting...";
+    s = (g_data_counted ? L"Holds " + size_text(g_data_bytes) + L"; " : L"") + size_text(free_bytes(g_cfg.data)) + L" free on that drive.";
   } else {
     s = L"Set up puts about " + size_text(Setup::space_needed(g_cfg)) + L" here; " + size_text(free_bytes(g_cfg.data)) + L" free on that drive.";
   }
@@ -561,22 +560,24 @@ void refresh_data_row() {
 }
 bool data_row_bad() { return !data_ok() || (place_risk(g_cfg.data) != Risk::None && !place_kept()); }
 
-// What the status line says when setup is not running: the next step of the first start.
+// What the status line says when setup is not running: the next step, a problem, or nothing (ready:
+// PLAY is enabled; a folder that is not right says why in its own row).
 std::wstring idle_status() {
   if (!g_note.empty()) return g_note;
   if (g_removing) return L"Removing the game data...";
-  if (g_ready) return L"Ready to play.";
+  if (g_ready) return L"";
   if (!data_ok()) return L"The game data cannot go into a game folder: Change... beside Game data chooses another place.";
-  double need = double(Setup::space_needed(g_cfg)), free = double(free_bytes(g_cfg.data));
-  std::wstring where = size_text((unsigned long long)need) + L" in " + g_cfg.data.wstring() + L" (" + size_text((unsigned long long)free) + L" free)";
-  if (free < need) return L"Not enough space: setup needs " + where + L". Change... beside Game data chooses another place.";
-  if (g_cfg.disc.empty()) return L"First choose the game's folder: the copy of your disc, the folder with PS3_GAME in it (Browse... above).";
+  unsigned long long need = Setup::space_needed(g_cfg), free = free_bytes(g_cfg.data);
+  if (free < need)
+    return L"Not enough space: Set up needs " + size_text(need) + L", the drive has " + size_text(free) +
+           L". Change... beside Game data chooses another place.";
+  if (g_cfg.disc.empty()) return L"Choose the game's folder: the copy of your disc, the folder with PS3_GAME in it.";
   if (files_missing())
-    return L"Next, the decrypted files: Prepare files makes them with your RPCS3 (rpcs3.net) and the PS3 update file PS3UPDAT.PUP "
-           L"4.93 (playstation.com), or Browse... chooses the files you decrypted yourself.";
-  if (!inputs_ok()) return L"Setup starts when the files above are found: about " + where + L".";
-  if (has_build(g_cfg.data)) return L"Set up updates the game to version " AC4_VERSION_W L": it rebuilds only what changed, a few minutes.";
-  return L"Set up prepares and builds the game once, a few minutes: " + where + L".";
+    return L"Prepare files makes the decrypted files with your RPCS3 (rpcs3.net) and the PS3 update file PS3UPDAT.PUP 4.93 "
+           L"(playstation.com); or Browse... chooses files you decrypted yourself.";
+  if (!inputs_ok()) return L"";
+  if (has_build(g_cfg.data)) return L"Set up updates the game to version " AC4_VERSION_W L" (it rebuilds only what changed).";
+  return L"Set up builds the game once (a few minutes).";
 }
 
 void update_buttons() {
@@ -594,7 +595,6 @@ void update_buttons() {
   for (int id : {kFps, kMode, kResolution}) EnableWindow(item(id), !playing && !g_cfg.data.empty());
   if (ac4::settings::Mode m = read_display().mode; m == ac4::settings::Mode::Borderless) EnableWindow(item(kResolution), FALSE);
   if (!g_setup.running() && !g_prep.running()) set_text(kStatus, idle_status());
-  set_text(kPlayState, playing ? L"Playing." : g_ready && inputs_ok() && !busy ? L"Ready." : L"");
 }
 
 void refresh_paths_from_ui() {
@@ -1063,7 +1063,7 @@ const Place kPlaces[] = {
     {kPrepare, 16, 178, 98, 28},     {kCancel, 16, 178, 98, 28},       {kPrepFiles, 16, 178, 98, 28},
     {kStatus, 124, 178, 420, 34},    {kProgress, 124, 216, 420, 10},
     {kMode, 124, 240, 190, 300},     {kResolution, 320, 240, 224, 300}, {kFps, 124, 274, 190, 300},
-    {kMore, 16, 320, 98, 30},        {kPlayState, 124, 326, 200, 20},  {kPlay, 334, 308, 210, 50},
+    {kMore, 16, 320, 98, 30},        {kPlay, 334, 308, 210, 50},
 };
 struct Label {
   int x, y, w, h;
@@ -1124,7 +1124,6 @@ void create_controls() {
   SendMessageW(item(kProgress), PBM_SETRANGE32, 0, 1000);
   for (int id : {kMode, kResolution, kFps}) make(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, id);
   make(L"BUTTON", L"More...", WS_TABSTOP | BS_PUSHBUTTON, kMore);
-  make(L"STATIC", L"", SS_RIGHT, kPlayState);
   make(L"BUTTON", L"PLAY", WS_TABSTOP | BS_DEFPUSHBUTTON, kPlay);
   show(kPrepFiles, false);
   show(kCancel, false);
@@ -1227,7 +1226,7 @@ void on_setup_update() {
 // At the start, with the window up: shortcuts of an older launcher open this one; a new copy of
 // the launcher offers the earlier install.
 void on_startup() {
-  if (g_embedded && retarget_shortcuts(g_self, AC4_VERSION)) g_note = L"The desktop shortcut and the Start menu entry now open this launcher.";
+  if (g_embedded) retarget_shortcuts(g_self, AC4_VERSION);  // the shortcuts it made open this launcher from now on
   if (g_offer_pending) offer_earlier_install();
   note_install();
   refresh_data_row();
@@ -1342,14 +1341,8 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
           break;
         }
         case kMenuShortcuts:
-          if (read_shortcuts().made()) {
-            remove_shortcuts();
-            g_note = L"The desktop shortcut and the Start menu entry are removed.";
-          } else if (std::string err = make_shortcuts(g_self, AC4_VERSION); !err.empty()) {
-            message(widen(err), MB_ICONWARNING);
-          } else {
-            g_note = L"Shortcuts added: on the desktop and in the Start menu.";
-          }
+          if (read_shortcuts().made()) remove_shortcuts();
+          else if (std::string err = make_shortcuts(g_self, AC4_VERSION); !err.empty()) message(widen(err), MB_ICONWARNING);
           update_buttons();
           break;
         case kMenuRemove:
