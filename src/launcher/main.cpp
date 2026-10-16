@@ -572,8 +572,23 @@ void prepare_files() {
 void start_checks();
 void refresh_paths_from_ui();
 
+// An RPCS3 window waiting for the player during Prepare files: brought to the front once, or
+// flashing in the taskbar when Windows keeps the focus with another program.
+HWND g_prep_asked = nullptr;
+void bring_forward(HWND w) {
+  if (!IsWindow(w)) return;
+  if (IsIconic(w)) ShowWindow(w, SW_RESTORE);
+  if (SetForegroundWindow(w)) return;
+  FLASHWINFO fi{sizeof fi, w, FLASHW_ALL | FLASHW_TIMERNOFG, 0, 0};
+  FlashWindowEx(&fi);
+}
+
 void on_prep_update() {
   Rpcs3Prep::View v = g_prep.view();
+  if (HWND(v.ask) != g_prep_asked) {
+    g_prep_asked = HWND(v.ask);
+    if (g_prep_asked) bring_forward(g_prep_asked);
+  }
   if (!v.finished) {
     set_text(kStatus, widen(v.status));
     return;
