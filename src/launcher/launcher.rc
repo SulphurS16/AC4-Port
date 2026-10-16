@@ -1,12 +1,18 @@
 // Launcher resources: the application manifest (common controls 6, per-monitor DPI awareness,
-// UTF-8 code page) and version information.
+// UTF-8 code page) and version information (VERSION, through CMake). A release launcher also
+// carries the port's sources (resource 2, launcher_source.rc in the build folder; source.h).
 #include <windows.h>
+
+// "0.2.0" from the numbers (string definitions lose their quotes on the way to the resource compiler).
+#define AC4_STRING2(x) #x
+#define AC4_STRING(x) AC4_STRING2(x)
+#define AC4_VERSION_TEXT AC4_STRING(AC4_VERSION_MAJOR.AC4_VERSION_MINOR.AC4_VERSION_PATCH)
 
 1 RT_MANIFEST "launcher.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION AC4_VERSION_MAJOR,AC4_VERSION_MINOR,AC4_VERSION_PATCH,0
+PRODUCTVERSION AC4_VERSION_MAJOR,AC4_VERSION_MINOR,AC4_VERSION_PATCH,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -16,8 +22,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "ARMORED CORE 4 PC port launcher"
       VALUE "ProductName", "ARMORED CORE 4 PC port (unofficial)"
-      VALUE "FileVersion", "1.0.0"
-      VALUE "ProductVersion", "1.0.0"
+      VALUE "FileVersion", AC4_VERSION_TEXT
+      VALUE "ProductVersion", AC4_VERSION_TEXT
       VALUE "OriginalFilename", "AC4-Launcher.exe"
     END
   END

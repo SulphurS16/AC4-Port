@@ -142,6 +142,12 @@ bool outputs_present(const SetupConfig& c, size_t step) {
 
 bool step_current(const SetupConfig& c, size_t step) { return outputs_present(c, step) && read_state(c, step) == stamp(c, step); }
 
+// What the game was built from beyond the generated code: also the release's sources (SOURCE.txt
+// names their commit; a development tree has none), so a newer release builds the game again.
+std::string built_stamp(const SetupConfig& c) {
+  return stamp(c, kRecompile) + "\n" + stamp(c, kSpu) + "\nsource " + content_hash(c.src / "SOURCE.txt");
+}
+
 std::wstring tool_path_prefix(const SetupConfig& c) {
   std::wstring p;
   for (const Tool& t : read_toolchain(c.src))
@@ -195,7 +201,7 @@ bool Setup::ready(const SetupConfig& c) {
   std::ifstream f(c.data / "state" / "built.txt", std::ios::binary);
   std::ostringstream ss;
   ss << f.rdbuf();
-  return ss.str() == stamp(c, kRecompile) + "\n" + stamp(c, kSpu);
+  return ss.str() == built_stamp(c);
 }
 
 unsigned long long Setup::space_needed(const SetupConfig& c) {
@@ -480,7 +486,7 @@ void Setup::run(SetupConfig c) {
       return false;
     }
     {
-      std::ofstream(c.data / "state" / "built.txt", std::ios::binary) << stamp(c, kRecompile) + "\n" + stamp(c, kSpu);
+      std::ofstream(c.data / "state" / "built.txt", std::ios::binary) << built_stamp(c);
     }
     finish_step(kBuild, false);
     // 9. Shaders known from the manifest, compiled before the first run.

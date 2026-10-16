@@ -30,6 +30,7 @@
 #include "launcher/process.h"
 #include "launcher/rpcs3.h"
 #include "launcher/setup.h"
+#include "launcher/source.h"
 
 namespace fs = std::filesystem;
 using namespace launcher;
@@ -68,6 +69,7 @@ UINT g_dpi = 96;
 int S(int v) { return MulDiv(v, int(g_dpi), 96); }
 
 fs::path g_src, g_ini_path;
+bool g_embedded = false;  // a release launcher: the port's sources come from inside it (source.h)
 fs::path g_user_override;  // launcher.ini [paths] user
 SetupConfig g_cfg;
 Setup g_setup;
@@ -152,7 +154,8 @@ fs::path user_dir() {
   return r.empty() ? local_appdata() / L"user" : r;
 }
 
-// The port's sources: the launcher sits in their folder (a release) or in a build folder below.
+// The port's sources for a launcher built from them: it sits in their folder (a copy of the
+// repository) or in a build folder below. A release launcher carries its own (source.h).
 fs::path find_sources() {
   wchar_t buf[MAX_PATH * 4];
   GetModuleFileNameW(nullptr, buf, DWORD(std::size(buf)));
@@ -419,6 +422,20 @@ bool data_ok() {
   for (const fs::path& in : {g_cfg.disc, g_cfg.files})
     if (inside(g_cfg.data, in)) return false;
   return true;
+}
+
+// A release launcher's sources, unpacked into the install folder (source.h) once that folder is
+// known to be outside the game's folders; report: a message box when that fails.
+bool ensure_source(bool report) {
+  if (!g_embedded) return true;
+  g_cfg.src = g_cfg.data / "source";
+  if (source_current(g_cfg.src)) return true;
+  if (!data_ok()) return false;
+  std::string err = unpack_source(g_cfg.src);
+  if (err.empty()) return true;
+  g_note = widen(err);
+  if (report) MessageBoxW(g_wnd, g_note.c_str(), kTitle, MB_ICONERROR);
+  return false;
 }
 
 bool inputs_ok() {
@@ -770,6 +787,10 @@ void more_menu() {
 
 void start_setup() {
   g_note.clear();
+  if (!ensure_source(true)) {
+    update_buttons();
+    return;
+  }
   g_setup.start(g_cfg, [] { PostMessageW(g_wnd, WM_SETUP, 0, 0); });
   update_buttons();
 }
@@ -899,6 +920,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
           }
           g_cfg.data = p;
           save_paths();
+          if (g_embedded && !g_cfg.disc.empty()) ensure_source(true);
           move_to_user_dir();
           load_settings_controls();
           update_buttons();
@@ -1055,8 +1077,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
   INITCOMMONCONTROLSEX icc{sizeof icc, ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES};
   InitCommonControlsEx(&icc);
-  g_src = find_sources();
-  if (g_src.empty()) {
+  // A release launcher always builds the sources it carries (an older release's tree may lie
+  // beside it); one built from a source tree uses that tree.
+  g_embedded = has_embedded_source();
+  if (!g_embedded) g_src = find_sources();
+  if (g_src.empty() && !g_embedded) {
     MessageBoxW(nullptr, L"Put AC4-Launcher.exe in the port's folder (the one with CMakeLists.txt, data and src).", kTitle, MB_ICONERROR);
     return 1;
   }
@@ -1066,8 +1091,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
   fs::path exe_dir = fs::path(self).parent_path();
   g_ini_path = (writable(exe_dir) ? exe_dir : local_appdata()) / "launcher.ini";
   load_paths();
-  g_cfg.src = g_src;
-  if (g_cfg.data.empty()) g_cfg.data = writable(g_src / "local") ? g_src / "local" : local_appdata();
+  // The install folder: the port's (or, for a release launcher, the launcher's) folder's "local"
+  // when it can be written, else under Local AppData.
+  fs::path home = g_embedded ? exe_dir : g_src;
+  if (g_cfg.data.empty()) g_cfg.data = writable(home / "local") ? home / "local" : local_appdata();
+  g_cfg.src = g_embedded ? g_cfg.data / "source" : g_src;
+  if (g_embedded && !g_cfg.disc.empty()) ensure_source(false);  // where the game is known (never inside it)
   {
     std::error_code ec;
     if (g_cfg.files.empty() && fs::is_regular_file(g_cfg.data / "decrypted" / "EBOOT.elf", ec)) g_cfg.files = g_cfg.data / "decrypted";
