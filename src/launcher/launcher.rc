@@ -13,6 +13,21 @@
 // The port's icon (data/ac4.ico: 16, 32 and 48 px): the file's icon and the window's.
 1 ICON "../../data/ac4.ico"
 
+#include "resource.h"
+
+// After the first successful Set up: which shortcuts to add (main.cpp offer_shortcuts).
+IDD_SHORTCUTS DIALOGEX 0, 0, 212, 92
+STYLE DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "ARMORED CORE 4"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+  LTEXT "Set up is done.", -1, 12, 10, 190, 10
+  AUTOCHECKBOX "Add a &desktop shortcut", IDC_SHORTCUT_DESKTOP, 12, 26, 190, 10, WS_TABSTOP
+  AUTOCHECKBOX "Add a &Start menu entry", IDC_SHORTCUT_START_MENU, 12, 39, 190, 10, WS_TABSTOP
+  LTEXT "They open the launcher; PLAY starts the game. More... adds or removes them later.", -1, 12, 54, 190, 18
+  DEFPUSHBUTTON "OK", IDOK, 150, 72, 50, 14
+END
+
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION AC4_VERSION_MAJOR,AC4_VERSION_MINOR,AC4_VERSION_PATCH,0
 PRODUCTVERSION AC4_VERSION_MAJOR,AC4_VERSION_MINOR,AC4_VERSION_PATCH,0

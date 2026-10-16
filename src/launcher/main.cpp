@@ -32,6 +32,7 @@
 #include "launcher/inputs.h"
 #include "launcher/install.h"
 #include "launcher/process.h"
+#include "launcher/resource.h"
 #include "launcher/rpcs3.h"
 #include "launcher/setup.h"
 #include "launcher/source.h"
@@ -829,18 +830,38 @@ void offer_earlier_install() {
   set_data(i.data);
 }
 
+// The shortcut question's dialog (launcher.rc IDD_SHORTCUTS): both boxes ticked; OK returns them
+// (bit 0 desktop, bit 1 Start menu), closing it returns none.
+INT_PTR CALLBACK shortcuts_proc(HWND d, UINT msg, WPARAM wp, LPARAM) {
+  switch (msg) {
+    case WM_INITDIALOG:
+      CheckDlgButton(d, IDC_SHORTCUT_DESKTOP, BST_CHECKED);
+      CheckDlgButton(d, IDC_SHORTCUT_START_MENU, BST_CHECKED);
+      return TRUE;
+    case WM_COMMAND:
+      if (LOWORD(wp) == IDOK)
+        EndDialog(d, (IsDlgButtonChecked(d, IDC_SHORTCUT_DESKTOP) == BST_CHECKED ? 1 : 0) |
+                         (IsDlgButtonChecked(d, IDC_SHORTCUT_START_MENU) == BST_CHECKED ? 2 : 0));
+      else if (LOWORD(wp) == IDCANCEL)
+        EndDialog(d, 0);
+      else
+        break;
+      return TRUE;
+  }
+  return FALSE;
+}
+
 // After the first successful Set up (once per Windows user; More... offers them again).
 void offer_shortcuts() {
   if (!read_shortcuts().answer.empty()) return;
-  int a = message(L"Set up is done.\n\nAdd a desktop shortcut and a Start menu entry for the launcher? They open this window; PLAY starts the "
-                  L"game.\n\n(More... adds or removes them later.)",
-                  MB_YESNO | MB_ICONQUESTION);
+  log_question(L"dialog: shortcuts | Set up is done. | Add a desktop shortcut | Add a Start menu entry");
+  INT_PTR chosen = DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_SHORTCUTS), g_wnd, shortcuts_proc, 0);
   if (!read_shortcuts().answer.empty()) return;  // answered meanwhile (More...)
-  if (a != IDYES) {
+  if (chosen <= 0) {
     record_shortcut_answer("no");
     return;
   }
-  std::string err = make_shortcuts(g_self, AC4_VERSION);
+  std::string err = make_shortcuts(g_self, AC4_VERSION, (chosen & 1) != 0, (chosen & 2) != 0);
   if (!err.empty()) message(widen(err), MB_ICONWARNING);
 }
 

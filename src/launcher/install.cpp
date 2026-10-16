@@ -346,14 +346,14 @@ void record_shortcut_answer(const std::string& answer) {
   save_record(r);
 }
 
-std::string make_shortcuts(const fs::path& exe, const std::string& version) {
+std::string make_shortcuts(const fs::path& exe, const std::string& version, bool want_desktop, bool want_start_menu) {
   fs::path desktop = known_folder(UserFolder::Desktop) / kShortcutName, start = known_folder(UserFolder::StartMenuPrograms) / kShortcutName;
-  std::string err = create_link(desktop, exe);
-  std::string err2 = create_link(start, exe);
+  std::string err = want_desktop ? create_link(desktop, exe) : "";
+  std::string err2 = want_start_menu ? create_link(start, exe) : "";
   ac4::Ini r = load_record();
   r.set("shortcuts", "answer", "yes");
-  r.set("shortcuts", "desktop", err.empty() ? narrow(desktop.wstring()) : "");
-  r.set("shortcuts", "start_menu", err2.empty() ? narrow(start.wstring()) : "");
+  r.set("shortcuts", "desktop", want_desktop && err.empty() ? narrow(desktop.wstring()) : "");
+  r.set("shortcuts", "start_menu", want_start_menu && err2.empty() ? narrow(start.wstring()) : "");
   r.set("shortcuts", "target", narrow(exe.wstring()));
   r.set("shortcuts", "version", version);
   save_record(r);

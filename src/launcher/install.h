@@ -59,8 +59,8 @@ struct Shortcuts {
 };
 Shortcuts read_shortcuts();
 void record_shortcut_answer(const std::string& answer);  // "no": asked, declined
-// Makes (or remakes) both, opening exe; records them. Returns "" or what went wrong.
-std::string make_shortcuts(const fs::path& exe, const std::string& version);
+// Makes (or remakes) the chosen ones, opening exe; records them. Returns "" or what went wrong.
+std::string make_shortcuts(const fs::path& exe, const std::string& version, bool desktop = true, bool start_menu = true);
 // Deletes the ones it made (left alone when the player pointed them elsewhere); the answer becomes "no".
 void remove_shortcuts();
 // The shortcuts it made open exe from now on when this launcher is newer than the one they open,
