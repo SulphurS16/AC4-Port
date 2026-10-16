@@ -15,6 +15,7 @@
 #include <mutex>
 
 #include "runtime/config.h"
+#include "runtime/gamepads.h"
 #include "runtime/gpu/window.h"
 #include "runtime/input.h"
 #include "runtime/log.h"
@@ -51,25 +52,15 @@ std::string date_text(s64 t) {
   return b;
 }
 
-// ---- controller ----
-using XGetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
-XGetState xinput() {
-  static XGetState fn = [] {
-    HMODULE h = LoadLibraryW(L"xinput1_4.dll");
-    if (!h) h = LoadLibraryW(L"xinput9_1_0.dll");
-    return h ? reinterpret_cast<XGetState>(reinterpret_cast<void*>(GetProcAddress(h, "XInputGetState"))) : nullptr;
-  }();
-  return fn;
-}
+// ---- controller (every connected one: gamepads.h) ----
 enum Pad : u32 { P_UP = 1, P_DOWN = 2, P_LEFT = 4, P_RIGHT = 8, P_ACCEPT = 16, P_BACK = 32, P_X = 64, P_Y = 128, P_START = 256 };
 constexpr u32 kDirections = P_UP | P_DOWN | P_LEFT | P_RIGHT;
 u32 pad_now() {
-  XGetState get = xinput();
-  if (!get || input_isolated()) return 0;
+  if (input_isolated()) return 0;
   u32 b = 0;
-  for (DWORD port = 0; port < 4; ++port) {
+  for (int port = 0; port < pads::kSlots; ++port) {
     XINPUT_STATE xs{};
-    if (get(port, &xs) != ERROR_SUCCESS) continue;
+    if (!pads::get(port, &xs)) continue;
     const auto& g = xs.Gamepad;
     if ((g.wButtons & XINPUT_GAMEPAD_DPAD_UP) || g.sThumbLY > 16000) b |= P_UP;
     if ((g.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) || g.sThumbLY < -16000) b |= P_DOWN;

@@ -154,6 +154,7 @@ int main(int argc, char** argv) {
     c.window_h = d.height;
   }
   std::string level = "info";
+  [[maybe_unused]] bool pad_selftest = false;  // --pad-selftest (developer builds)
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };

@@ -120,7 +120,7 @@ if(AC4_GEN_SRC)
   target_compile_options(ac4 PRIVATE ${AC4_CPU_FLAGS} -fno-strict-aliasing -Wall -Wextra -Wno-unused-parameter -g)
   # Whole-archive: the function table references everything anyway; keeps HLE registrars alive.
   target_link_libraries(ac4 PRIVATE ac4_ppu_gen ac4_spu_gen ac4_spu ac4_ppu ac4_common d3d11 dxgi d3dcompiler d2d1 dwrite ole32 psapi
-                        synchronization)
+                        synchronization hid setupapi)
 endif()
 
 # ---- preparation tool ----

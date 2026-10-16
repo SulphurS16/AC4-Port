@@ -1,6 +1,6 @@
 // HLE: sys_io (cellPad, cellKb, cellMouse).
-// Pad port 0 combines the first XInput controller with a keyboard fallback; ports 1-3 map to
-// further XInput controllers when connected. Keyboard/mouse libraries report no device (the game
+// Pad port 0 combines the first controller (gamepads.h: XInput controllers, then PlayStation
+// controllers) with the keyboard and mouse; ports 1-3 map to further controllers when connected. Keyboard/mouse libraries report no device (the game
 // is played with the pad; host keyboard input feeds the pad emulation instead).
 #define WIN32_LEAN_AND_MEAN
 #include <algorithm>
@@ -20,6 +20,7 @@
 #include "ppu/ppu_recomp.h"
 #include "common/settings_file.h"
 #include "runtime/config.h"
+#include "runtime/gamepads.h"
 #include "runtime/hle.h"
 #include "runtime/lv2/lv2.h"
 #include "runtime/bindings.h"
@@ -51,25 +52,6 @@ struct PadState {
   bool connected = false;
 };
 
-// XInput is loaded from the OS at runtime (xinput1_4 ships with Windows 8+; 9_1_0 as fallback).
-using XGetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
-using XSetState = DWORD(WINAPI*)(DWORD, XINPUT_VIBRATION*);
-XGetState g_xget = nullptr;
-XSetState g_xset = nullptr;
-void load_xinput() {
-  static bool done = false;
-  if (done) return;
-  done = true;
-  HMODULE h = LoadLibraryW(L"xinput1_4.dll");
-  if (!h) h = LoadLibraryW(L"xinput9_1_0.dll");
-  if (!h) {
-    LOG_W("pad", "XInput not available; keyboard input only");
-    return;
-  }
-  g_xget = reinterpret_cast<XGetState>(reinterpret_cast<void*>(GetProcAddress(h, "XInputGetState")));
-  g_xset = reinterpret_cast<XSetState>(reinterpret_cast<void*>(GetProcAddress(h, "XInputSetState")));
-}
-
 std::mutex g_mu;
 bool g_init = false;
 u32 g_max = 0;
@@ -83,8 +65,8 @@ u8 axis(SHORT v) { return u8(std::clamp((int(v) + 32768) >> 8, 0, 255)); }
 
 PadState read_port(u32 port) {
   PadState s;
-  XINPUT_STATE xs{};
-  bool xin = g_xget && !input_isolated() && g_xget(port, &xs) == ERROR_SUCCESS;
+  XINPUT_STATE xs{};  // the controller in this slot, in XInput's layout (gamepads.h)
+  bool xin = !input_isolated() && pads::get(int(port), &xs);
   if (xin) {
     s.connected = true;
     const auto& g = xs.Gamepad;
@@ -150,7 +132,6 @@ s32 cellPadInit(u32 max) {
   std::lock_guard lk(g_mu);
   if (g_init) return PAD_ERR_ALREADY_INITIALIZED;
   if (max == 0 || max > kMaxPads) return PAD_ERR_INVALID_PARAMETER;
-  load_xinput();
   g_init = true;
   g_max = std::min(max, kPorts);
   std::fill(std::begin(g_have_last), std::end(g_have_last), false);
@@ -286,10 +267,8 @@ s32 cellPadSetActDirect(u32 port, Ptr<ActParam> p) {
   std::lock_guard lk(g_mu);
   if (!g_init) return PAD_ERR_UNINITIALIZED;
   if (port >= g_max || !p) return PAD_ERR_INVALID_PARAMETER;
-  XINPUT_VIBRATION v{};
-  v.wRightMotorSpeed = p->motor[0] ? 0xC000 : 0;  // small motor: on/off
-  v.wLeftMotorSpeed = WORD(p->motor[1]) * 257;     // large motor: 0-255
-  if (g_xset) g_xset(port, &v);
+  if (!input_isolated())  // large motor 0-255, small motor on/off
+    pads::vibrate(int(port), WORD(WORD(p->motor[1]) * 257), WORD(p->motor[0] ? 0xC000 : 0));
   return CELL_OK;
 }
 

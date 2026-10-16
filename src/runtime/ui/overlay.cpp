@@ -18,6 +18,7 @@
 #include "common/settings_file.h"
 #include "runtime/bindings.h"
 #include "runtime/config.h"
+#include "runtime/gamepads.h"
 #include "runtime/gpu/display.h"
 #include "runtime/gpu/window.h"
 #include "runtime/input.h"
@@ -686,21 +687,11 @@ void update_client_size() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Controllers (navigation while open).
-using XGetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
-XGetState g_xget = nullptr;
-bool g_xinput_loaded = false;
+// Controllers (navigation while open; every connected one: gamepads.h).
 u16 g_pad_prev = 0;
 int g_stick_prev = 0;  // bit 0 up, 1 down, 2 left, 3 right (left stick past the threshold)
 Clock::time_point g_repeat_at;
 int g_repeat_dir = 0;
-
-void load_xinput() {
-  g_xinput_loaded = true;
-  HMODULE h = LoadLibraryW(L"xinput1_4.dll");
-  if (!h) h = LoadLibraryW(L"xinput9_1_0.dll");
-  if (h) g_xget = reinterpret_cast<XGetState>(reinterpret_cast<void*>(GetProcAddress(h, "XInputGetState")));
-}
 
 }  // namespace
 
@@ -867,13 +858,12 @@ void tick() {
     if (g_state == State::Closed) open_locked();
   }
   if (g_state.load() == State::Closed) return;
-  if (!g_xinput_loaded) load_xinput();
   u16 buttons = 0;
   float lx = 0, ly = 0;
-  if (g_xget && !input_isolated())
-    for (DWORD p = 0; p < 4; ++p) {
+  if (!input_isolated())
+    for (int p = 0; p < pads::kSlots; ++p) {
       XINPUT_STATE xs{};
-      if (g_xget(p, &xs) != ERROR_SUCCESS) continue;
+      if (!pads::get(p, &xs)) continue;
       buttons |= xs.Gamepad.wButtons;
       float x = xs.Gamepad.sThumbLX / 32768.0f, y = xs.Gamepad.sThumbLY / 32768.0f;
       if (std::fabs(x) + std::fabs(y) > std::fabs(lx) + std::fabs(ly)) lx = x, ly = y;
