@@ -25,6 +25,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "ppu/ppu_recomp.h"
 #include "runtime/config.h"
@@ -78,7 +79,30 @@ constexpr u32 kSliderMin = 52, kSliderMax = 56, kSliderValue = 60, kSliderStep =
 
 // Pad bits (cellPad digital words).
 constexpr u16 kStart = 0x8, kUp = 0x10, kRight = 0x20, kDown = 0x40, kLeft = 0x80;
-constexpr u16 kCircle = 0x20, kCross = 0x40;
+constexpr u16 kL1 = 0x4, kR1 = 0x8, kCircle = 0x20, kCross = 0x40;
+
+// Controls a scene draws beside a dialog's items (not objects of it), in the 1280x720 picture.
+// ACSIS > ASSEMBLY, WEAPON and their pages (BASE, BOOSTER, WEAPON; dialog vtable 0x10132000; runs
+// 20261029-151118): the part picker cycles the focused slot's parts with Left / Right (its ◀ ▶),
+// Cross equips the part shown, L1 / R1 change the page (the strip's < >). The dialog's items are
+// the slots (ids 1000-1049: a click selects one, as the D-pad does; Cross there would equip the
+// part shown) and the next page's button (1050, ">>BOOSTER": a click chooses it).
+constexpr u32 kPartsDialog = 0x10132000;
+constexpr s32 kPartsNextPage = 1050;
+struct SceneControl {
+  u32 dialog_vtable;
+  float l, t, r, b;
+  u16 d1, d2;  // the press a click gives
+};
+const SceneControl kSceneControls[] = {
+    {kPartsDialog, 400, 510, 431, 565, kLeft, 0},   // the picker's ◀
+    {kPartsDialog, 679, 510, 710, 565, kRight, 0},  // its ▶
+    {kPartsDialog, 431, 410, 679, 668, 0, kCross},  // the part shown: equip it
+    {kPartsDialog, 100, 112, 132, 144, 0, kL1},     // the page strip's <
+    {kPartsDialog, 282, 112, 314, 144, 0, kR1},     // its >
+};
+// The wheel over the picker cycles the parts (up: Left, down: Right).
+constexpr float kPickerL = 400, kPickerT = 405, kPickerR = 710, kPickerB = 672;
 
 s64 now_ms() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -119,6 +143,7 @@ Drag g_drag;
 // Main thread only.
 bool g_probing = false;
 u32 g_probe_dialog = 0;
+u32 g_probe_busy = 0;    // a dialog the probe reached that takes keys but is busy now (opening, closing)
 u32 g_probe_object = 0;  // the scene menu object the probe reached (0: a dialog manager)
 u32 g_last_dialog = 0;
 int g_last_x = -1, g_last_y = -1;
@@ -167,7 +192,10 @@ bool probe_manager(Ctx& ctx, u32 mgr) {
     }
   }
   if (!listed || !enabled) return false;
-  if (call(ctx, vfunc(top, kDlgBusy), top) != 0) return false;
+  if (call(ctx, vfunc(top, kDlgBusy), top) != 0) {
+    if (!g_probe_busy) g_probe_busy = top;
+    return false;
+  }
   g_probe_dialog = top;
   return true;
 }
@@ -211,7 +239,10 @@ void menu_object_hook(Ctx& ctx, void (*orig)(Ctx&)) {
   }
   u32 dialog = 0;
   if (valid(obj + kMenuWhich)) dialog = ppu::r32(obj + (ppu::r32(obj + kMenuWhich) == 1 ? kMenuDlgA : kMenuDlgB));
-  if (valid(dialog) && call(ctx, vfunc(dialog, kDlgBusy), dialog) == 0) g_probe_dialog = dialog;
+  if (valid(dialog)) {
+    if (call(ctx, vfunc(dialog, kDlgBusy), dialog) == 0) g_probe_dialog = dialog;
+    else if (!g_probe_busy) g_probe_busy = dialog;
+  }
   g_probe_object = obj;
   ctx.r[3] = 1;  // the routing stops here either way (as the game's would: this object takes keys)
 }
@@ -306,6 +337,7 @@ bool list_select(Ctx& ctx, u32 list, s32 target) {
 // unnamed parts, then the smallest. `slider`: a slider whose bar is under the point, if any.
 u32 object_at(Ctx& ctx, u32 dialog, float gx, float gy, u32* slider = nullptr) {
   if (slider) *slider = 0;
+  if (!valid(dialog + kDlgChildCount)) return 0;
   u32 arr = ppu::r32(dialog + kDlgChildren), n = ppu::r32(dialog + kDlgChildCount);
   if (n == 0 || n > 1024 || !valid(arr, 4 * n)) return 0;
   local(dialog, &gx, &gy);
@@ -334,6 +366,64 @@ u32 object_at(Ctx& ctx, u32 dialog, float gx, float gy, u32* slider = nullptr) {
     }
   }
   return best;
+}
+
+// Whether a dialog has an item the D-pad or the cursor can focus.
+bool has_focusable(Ctx& ctx, u32 dialog) {
+  if (!valid(dialog + kDlgChildCount)) return false;
+  u32 arr = ppu::r32(dialog + kDlgChildren), n = ppu::r32(dialog + kDlgChildCount);
+  if (n == 0 || n > 1024 || !valid(arr, 4 * n)) return false;
+  for (u32 i = 0; i < n; ++i) {
+    u32 obj = ppu::r32(arr + 4 * i);
+    if (valid(obj, 16) && call(ctx, vfunc(obj, kObjFocusable), obj) != 0) return true;
+  }
+  return false;
+}
+
+// The arrow under (x, y) (dialog coordinates), if any: a small unnamed part (6-20 x 8-32) that is
+// one of a pair, the ◀ ▶ of a choice row (COPY > CATEGORY: 14 x 27, CONTROL OPTIONS > KEY TYPE) or
+// the ▲ ▼ of a list. Returns the D-pad direction it stands for (0: none) and its centre. Choice
+// rows' arrows also line up with the next row's: a partner side by side wins (the ACFA port's rule,
+// its arrows 11 x 19).
+u16 arrow_at(Ctx& ctx, u32 dialog, float x, float y, float* cx, float* cy) {
+  if (!valid(dialog + kDlgChildCount)) return 0;
+  u32 arr = ppu::r32(dialog + kDlgChildren), n = ppu::r32(dialog + kDlgChildCount);
+  if (n == 0 || n > 1024 || !valid(arr, 4 * n)) return 0;
+  std::vector<Rect> parts;
+  int at = -1;
+  for (u32 i = 0; i < n; ++i) {
+    u32 obj = ppu::r32(arr + 4 * i);
+    if (!valid(obj, 16) || is_list(obj) || is_slider(obj)) continue;
+    s32 id = s32(ppu::r32(obj + kObjId));
+    if ((id != 0 && id != -1) || call(ctx, vfunc(obj, kObjFocusable), obj) != 0) continue;
+    Rect r = rect_of(ctx, obj);
+    float w = r.r - r.l, h = r.b - r.t;
+    if (w < 6 || w > 20 || h < 8 || h > 32) continue;
+    if (x >= r.l - 4 && x < r.r + 4 && y >= r.t - 4 && y < r.b + 4) at = int(parts.size());
+    parts.push_back(r);
+  }
+  if (at < 0) return 0;
+  const Rect& a = parts[size_t(at)];
+  *cx = (a.l + a.r) / 2;
+  *cy = (a.t + a.b) / 2;
+  float side = 0, stack = 0;  // the nearest partner side by side / above or below (signed distance)
+  for (size_t i = 0; i < parts.size(); ++i) {
+    float px = (parts[i].l + parts[i].r) / 2 - *cx, py = (parts[i].t + parts[i].b) / 2 - *cy;
+    if (int(i) == at) continue;
+    if (std::fabs(py) < 3 && std::fabs(px) > 20 && (side == 0 || std::fabs(px) < std::fabs(side))) side = px;
+    if (std::fabs(px) < 3 && std::fabs(py) > 20 && (stack == 0 || std::fabs(py) < std::fabs(stack))) stack = py;
+  }
+  if (side != 0) return side > 0 ? kLeft : kRight;
+  if (stack != 0) return stack > 0 ? kUp : kDown;
+  return 0;
+}
+
+// The scene-drawn control under (gx, gy) for this dialog (kSceneControls), or nullptr.
+const SceneControl* scene_control_at(u32 dialog, float gx, float gy) {
+  u32 vt = valid(dialog) ? ppu::r32(dialog) : 0;
+  for (const SceneControl& s : kSceneControls)
+    if (s.dialog_vtable == vt && gx >= s.l && gx < s.r && gy >= s.t && gy < s.b) return &s;
+  return nullptr;
 }
 
 void press(u16 d1, u16 d2, s64 at, bool screen_only = false) {
@@ -387,13 +477,23 @@ void frame(Ctx& ctx) {
   ppu::w32(msg, kKeyMessage);
   ppu::w32(msg + 4, kProbeCode);
   g_probe_dialog = 0;
+  g_probe_busy = 0;
   g_probe_object = 0;
   g_probing = true;
   call(ctx, vfunc(framework, kFrameworkDispatch), framework, msg);
   g_probing = false;
   u32 dialog = g_probe_dialog;
+  // A menu: a dialog takes keys and has a focused item. Outside gameplay also a dialog with items
+  // to focus but none focused (the postgame hub's MISSION LIST after LOAD GAME until the first
+  // input: run 20261029-150825) and a dialog that would take keys but is busy (opening, closing).
+  // Only where no dialog takes keys at all (the title's PRESS START, movies, the mission report,
+  // loading) is it a screen, where the menu's confirm and back keys press Start: a menu taken for
+  // a screen would open its KEY GUIDE instead of choosing (the ACFA port's issue #6). In gameplay
+  // only a focused dialog is a menu (the pause menu), as before: mouse look keeps the mouse.
+  bool gameplay = mission_running();
   bool menu = dialog && valid(dialog + kDlgFocus) && ppu::r32(dialog + kDlgFocus) != 0;
-  InputContext c = menu ? InputContext::Menu : mission_running() ? InputContext::Gameplay : InputContext::Screen;
+  if (!menu && !gameplay) menu = dialog ? has_focusable(ctx, dialog) : g_probe_busy != 0;
+  InputContext c = menu ? InputContext::Menu : gameplay ? InputContext::Gameplay : InputContext::Screen;
   InputContext was = InputContext(g_context.exchange(int(c)));
   bool mouse = g_mouse_at.load() > std::max(g_pad_at.load(), g_key_at.load());
   bool focus = input_has_focus();
@@ -427,7 +527,7 @@ void frame(Ctx& ctx) {
     g_drag = {};
     g_hold = 0;
   }
-  if (c != InputContext::Menu) {
+  if (c != InputContext::Menu || !valid(dialog + kDlgFocus)) {  // a busy dialog: the mouse waits for it
     g_last_dialog = dialog;
     return;
   }
@@ -445,6 +545,7 @@ void frame(Ctx& ctx) {
   u32 hit = 0, slider = 0;
   s32 row = -1;  // a list's row under the cursor
   bool row_safe = false;
+  bool refocused = false;  // the focus moved in this frame
   if (show && (moved || down) && !(g_drag.slider && g_drag.button)) {
     hit = object_at(ctx, dialog, gx, gy, &slider);
     // A menu object's other panel (the hub's mission list and its buttons): switched to as Left
@@ -466,6 +567,7 @@ void frame(Ctx& ctx) {
     }
     if (hit && hit != ppu::r32(dialog + kDlgFocus)) {
       call(ctx, vfunc(dialog, kDlgSetFocus), dialog, hit);
+      refocused = true;
     }
     if (hit && is_list(hit)) {
       float lx = gx, ly = gy;
@@ -478,13 +580,28 @@ void frame(Ctx& ctx) {
     }
   }
   s64 t = now_ms();
+  // A press made in the frame that moved the focus can be lost (the ACFA port: CLIENT SELECT, runs
+  // 20261016-035308 / -035810): then it waits until the dialog has taken the focus.
+  s64 due = t + (refocused ? 150 : 0);
+  float lx = gx, ly = gy;  // the dialog's coordinates
+  local(dialog, &lx, &ly);
   for (const Event& e : events) {
     if (e.kind == Event::LeftDown) {
+      float ax = 0, ay = 0;
+      u16 arrow = slider ? 0 : arrow_at(ctx, dialog, lx, ly, &ax, &ay);
+      const SceneControl* scene = slider || arrow ? nullptr : scene_control_at(dialog, gx, gy);
       if (slider) {  // on a slider's bar: the slider follows the cursor while the button is down
         g_drag = {slider, true, 0, 0, 0};
+      } else if (arrow) {  // a choice row's ◀ ▶ (its row took the focus above): the direction
+        press(arrow, 0, due);
+      } else if (scene && !hit) {  // a control the scene draws (the part picker's ◀ ▶, the page < >)
+        press(scene->d1, scene->d2, due);
       } else if (hit) {
+        // A slot of the parts screens only takes the focus (done above).
+        s32 id = s32(ppu::r32(hit + kObjId));
+        if (valid(dialog) && ppu::r32(dialog) == kPartsDialog && id >= 1000 && id < kPartsNextPage) continue;
         if (row >= 0) list_select(ctx, hit, row);  // a list's row: selected, then chosen
-        press(0, kCross, t + (row >= 0 ? 50 : 0));  // a click on an item chooses it; elsewhere nothing
+        press(0, kCross, row >= 0 ? t + 50 : due);  // a click on an item chooses it; elsewhere nothing
       }
     } else if (e.kind == Event::LeftUp) {
       if (g_drag.button) g_drag.released = t;
@@ -492,7 +609,10 @@ void frame(Ctx& ctx) {
     } else if (e.kind == Event::Right) {
       press(0, kCircle, t);
     } else if (e.kind == Event::Wheel) {
-      for (int i = 0; i < std::abs(e.value); ++i, t += 90) press(e.value > 0 ? kUp : kDown, 0, t);
+      // Over the part picker the wheel cycles the parts (Left / Right), elsewhere it moves Up / Down.
+      bool picker = valid(dialog) && ppu::r32(dialog) == kPartsDialog && gx >= kPickerL && gx < kPickerR && gy >= kPickerT && gy < kPickerB;
+      for (int i = 0; i < std::abs(e.value); ++i, t += 90)
+        press(picker ? (e.value > 0 ? kLeft : kRight) : (e.value > 0 ? kUp : kDown), 0, t);
     }
   }
   if (g_drag.slider) {

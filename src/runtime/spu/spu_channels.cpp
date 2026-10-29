@@ -358,11 +358,17 @@ void mfc_command(Thread& t, u32 cmd) {
 // Waits for an event with the line-write sequence, bounded by the decrementer deadline and a
 // polling interval for reservation loss caused by plain PPU stores.
 void wait_event(Thread& t, u32 seq, u32 spins) {
-  if (spins < 64) {
+  // Spin, then yield, then sleep until a line write (or 1 ms). With few logical processors (a
+  // two-core laptop) every spinning or yielding SPU takes processor time from the threads it waits
+  // for (the opening movie ran at a quarter of its speed on two processors, run 20261024-165647):
+  // short phases there; the long ones on larger CPUs, where they cost nothing that is needed.
+  u32 cpus = res::host_processors();
+  u32 pause_end = cpus <= 4 ? 8 : cpus <= 8 ? 16 : 64, yield_end = cpus <= 4 ? 16 : cpus <= 8 ? 64 : 512;
+  if (spins < pause_end) {
     _mm_pause();
     return;
   }
-  u64 timeout_us = spins < 512 ? 20 : 1000;
+  u64 timeout_us = spins < yield_end ? 20 : 1000;
   {
     std::lock_guard lk(t.m);
     if ((t.event_mask & EV_TM) && !t.dec_frozen) {
@@ -432,6 +438,29 @@ bool event_pending(Thread& t) {
   std::lock_guard lk(t.m);
   poll_locked(t);
   return t.event_count != 0;
+}
+
+void park_self_branch(Thread& t) {
+  std::unique_lock lk(t.m);
+  t.cv.wait_for(lk, std::chrono::milliseconds(1), [&] { return t.stop_request.load(std::memory_order_relaxed); });
+}
+
+void idle_until_event(Thread& t) {
+  t.wait_ch.store(SPU_RdEventStat, std::memory_order_relaxed);  // diagnostics: blocked as on that channel
+  for (u32 spins = 0;; ++spins) {
+    u32 seq = res::begin_wait();
+    {
+      std::lock_guard lk(t.m);
+      poll_locked(t);
+      if (t.event_count || t.stop_request) {
+        res::end_wait();
+        break;
+      }
+    }
+    wait_event(t, seq, spins);
+    res::end_wait();
+  }
+  t.wait_ch.store(~0u, std::memory_order_relaxed);
 }
 
 // Marks the channel a thread may block on (diagnostics).

@@ -10,8 +10,8 @@ const char* const kModules[kModuleCount] = {"libsre",  "libsail", "libpamf",    
 
 namespace {
 
-// RPCS3's decryptions of the 4.93 modules (verified 2026-10-15 with RPCS3 0.0.42-19698: identical to
-// the ACFA port's own decryption; the same files for every game).
+// RPCS3's decryptions of the 4.93 modules (verified 2026-10-15 with RPCS3 0.0.42-19698; the same
+// files for every game).
 const Known kModules493[kModuleCount] = {
     {"libsre.prx", "9e7ee6edc99b1d372686cf927b883b18f19ed4d32d1faf35e214cca4ae0737b6", 239344},
     {"libsail.prx", "ac33b80980d45113d887c868ff02619dc145e8a80bc102749a31fbd750431bbb", 203400},

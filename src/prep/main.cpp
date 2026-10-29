@@ -5,14 +5,6 @@
 //   ac4-prep cpu                         (exit code 3 if the CPU lacks x86-64-v3 features)
 //   ac4-prep spu-records --manifest <spu_manifest.txt> --out <spu_cache-dir> <prepared-dir>
 //                                         (SPU code records rebuilt from the user's prepared files)
-// Development builds only (key-based path, not in the release):
-//   ac4-prep identify <game-root>
-//   ac4-prep pkg      <file.pkg> <out-dir>   [--keys <file>]
-//   ac4-prep self     <file.self> <out.elf>  [--keys <file>]
-//   ac4-prep prepare  --game <game-root> --out <dir> [--keys <file>] [--update <file.pkg>|none]
-//                      (update packages: the given ones, none, or by default <game-root>/Updates/*.pkg)
-//   ac4-prep firmware <PS3UPDAT.PUP> <out-dir>  [--keys <file>]   (dev_flash extraction)
-//   ac4-prep lle --firmware <fw-dir> --out <prepared-dir> [--modules libsre,...]  (relocated LLE modules)
 // Inputs are only read; every write is checked against the protected roots.
 #include <cstdio>
 #include <cstring>
@@ -39,33 +31,18 @@ int main(int argc, char** argv) {
       return 2;
     }
     std::string cmd = argv[1];
-    std::string keyfile, game, out, firmware, manifest, flash_out;
-    std::vector<std::string> modules = {"libsre"}, updates;
+    std::string out, manifest, flash_out;
     std::vector<std::string> pos;
     ImportInputs imp;
     for (int i = 2; i < argc; ++i) {
       std::string a = argv[i];
-      if (a == "--keys") keyfile = arg_value(i, argc, argv);
-      else if (a == "--game") game = arg_value(i, argc, argv);
-      else if (a == "--out") out = arg_value(i, argc, argv);
-      else if (a == "--firmware") firmware = arg_value(i, argc, argv);
+      if (a == "--out") out = arg_value(i, argc, argv);
       else if (a == "--manifest") manifest = arg_value(i, argc, argv);
-      else if (a == "--update") updates.push_back(arg_value(i, argc, argv));
       else if (a == "--disc") imp.disc = arg_value(i, argc, argv);
       else if (a == "--eboot") imp.eboot_elf = arg_value(i, argc, argv);
       else if (a == "--modules-dir") imp.modules_dir = arg_value(i, argc, argv);
       else if (a == "--flash-file") imp.flash_atrac = arg_value(i, argc, argv);
       else if (a == "--flash-out") flash_out = arg_value(i, argc, argv);
-      else if (a == "--modules") {
-        modules.clear();
-        std::string v = arg_value(i, argc, argv);
-        for (size_t p = 0; p <= v.size();) {
-          size_t q = v.find(',', p);
-          if (q == std::string::npos) q = v.size();
-          if (q > p) modules.push_back(v.substr(p, q - p));
-          p = q + 1;
-        }
-      }
       else pos.push_back(a);
     }
     if (cmd == "import" && !out.empty() && !imp.disc.empty() && !imp.eboot_elf.empty() && !imp.modules_dir.empty() &&

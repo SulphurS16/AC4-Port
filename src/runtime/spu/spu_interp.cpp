@@ -142,6 +142,15 @@ const spu_gen::Chunk* lookup(Thread& t, u32 pc) {
   return found;
 }
 
+// The instruction at pc branches to itself (br . / bra pc): an SPU waiting for an interrupt.
+bool self_branch(const Thread& t, u32 pc) {
+  const u32 w = __builtin_bswap32(*reinterpret_cast<const u32*>(t.ls + (pc & 0x3fffc)));
+  const u32 op9 = w >> 23, i16 = (w >> 7) & 0xffff;
+  if (op9 == 0x064) return i16 == 0;                               // br: pc-relative
+  if (op9 == 0x060) return (u32(s32(int16_t(i16)) << 2) & 0x3fffc) == (pc & 0x3fffc);  // bra: absolute
+  return false;
+}
+
 // ---- interpreter ----
 // Executes from t.pc until control leaves straight-line flow (taken branch, call, indirect
 // branch, resumed stop) or `budget` instructions have run. Returns false if the thread stops.
@@ -239,9 +248,23 @@ void interpret(Thread& t) {
   // thread (spu_facts.md §3.8). Recompiled code runs on the same thread.
   _mm_setcsr(_mm_getcsr() | 0xE040);
   if (!t.dcache) t.dcache.reset(new Thread::CacheEnt[kLsSize / 4]());
+  const auto parking = [] { return true; };
   for (;;) {
     if (t.stop_request.load(std::memory_order_relaxed)) return;
-    if (t.int_enabled) t.pc = check_interrupt(t, t.pc);
+    if (t.int_enabled) {
+      t.pc = check_interrupt(t, t.pc);
+      // A branch to itself with interrupts enabled waits for the next event (SPURS kernels idle
+      // this way): block until one is pending instead of looping on a host core (on two logical
+      // processors these loops took most of the processor time from the PPU threads that give
+      // them work; run 20261024-170850).
+      if (t.int_enabled && parking() && self_branch(t, t.pc)) {
+        idle_until_event(t);
+        continue;
+      }
+    } else if (parking() && self_branch(t, t.pc)) {  // interrupts disabled: only a stop ends it
+      park_self_branch(t);
+      continue;
+    }
     const spu_gen::Chunk* c = lookup(t, t.pc);
     if (c) {
       ++t.compiled_runs;

@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
+#include <sstream>
 #include <system_error>
 
 #include "common/bytes.h"
@@ -41,6 +43,10 @@ const char* const kDisplay =
 
 const char* const kMouse =
     "[mouse]\n"
+    "# How the mouse turns and looks in missions: stick (as the controller's right stick: the AC\n"
+    "# turns as far as the mouse moves, as fast as it can turn) or camera (only the camera turns, at\n"
+    "# once and freely; the AC turns after it, and aims and moves as in the game)\n"
+    "mode = stick\n"
     "# Rotation per raw mouse count relative to the default (1.0): x turns, y looks up and down.\n"
     "# Raw input: no acceleration, smoothing or dead zone.\n"
     "sensitivity_x = 1.0\n"
@@ -53,11 +59,13 @@ const char* const kKeyboardHead =
     "# Keyboard and mouse bindings onto the controller: <control> = <input>[, <input>...]\n"
     "# Controls: cross circle square triangle l1 l2 l3 r1 r2 r3 start select up down left right\n"
     "#   lstick_up lstick_down lstick_left lstick_right rstick_up rstick_down rstick_left rstick_right\n"
+    "#   purge_right_weapon purge_left_weapon purge_shoulder_weapon\n"
     "# Inputs: A-Z, 0-9, F2-F10, F12, Num0-Num9, Space, Enter, Escape, Tab, Backspace, Shift, Ctrl,\n"
     "#   Alt, Up, Down, Left, Right, Home, End, PageUp, PageDown, Insert, Delete, CapsLock, Mouse1\n"
     "#   (left), Mouse2 (right), Mouse3 (middle), Mouse4, Mouse5, WheelUp, WheelDown\n"
-    "# Mouse buttons and the wheel count while the game window has the mouse (click into it). The\n"
-    "# mouse moves the camera in missions and the AC turns after it.\n";
+    "# Mouse buttons and the wheel count while the game window has the mouse (click into it). In\n"
+    "# missions a control's keys do its TYPE A action (cross: right weapon, ...) whatever key type the\n"
+    "# game is set to; the mouse turns and looks ([mouse] mode).\n";
 
 const char* const kKeyboardDefaults =
     "# What the controls do follows the game's control TYPE A (SYSTEM > CONTROL OPTIONS > KEY\n"
@@ -67,7 +75,7 @@ const char* const kKeyboardDefaults =
     "lstick_down = S\n"
     "lstick_left = A\n"
     "lstick_right = D\n"
-    "# SIGHT (right stick: turn, look up and down) from the keys; the mouse moves the camera\n"
+    "# SIGHT (right stick: turn, look up and down) from the keys; the mouse turns and looks\n"
     "rstick_up = I, Num8\n"
     "rstick_down = K, Num5\n"
     "rstick_left = J, Num4\n"
@@ -93,7 +101,12 @@ const char* const kKeyboardDefaults =
     "up = Up\n"
     "down = Down\n"
     "left = Left\n"
-    "right = Right\n";
+    "right = Right\n"
+    "# Key-only actions in missions, the controller's button combinations: purge the right, left or\n"
+    "# shoulder weapon (both weapon switches and the weapon's button; no keys until you choose them)\n"
+    "purge_right_weapon =\n"
+    "purge_left_weapon =\n"
+    "purge_shoulder_weapon =\n";
 
 // The defaults of 0.1 and 0.2: a file whose bindings are still exactly these takes the defaults
 // above (bindings the player changed stay).
@@ -250,6 +263,36 @@ Ini load_or_create(const std::filesystem::path& file, std::vector<std::string>* 
       ini = Ini::parse(with_keyboard_section(ini.text(), std::string(kKeyboardHead) + kKeyboardDefaults));
       changed = true;
       note("settings: keyboard bindings were the earlier defaults: now the current defaults");
+    }
+    // Controls added since the file was written (the purges, 0.6.0): their default keys where no
+    // other control has them.
+    {
+      auto squeeze = [](const std::string& v) {  // an input name as compared: lower case, no spaces
+        std::string s;
+        for (char ch : v)
+          if (ch != ' ' && ch != '\t') s += char(std::tolower(static_cast<unsigned char>(ch)));
+        return s;
+      };
+      std::set<std::string> used;
+      for (const auto& [k, v] : ini.entries("keyboard")) {
+        std::istringstream items(v);
+        for (std::string item; std::getline(items, item, ',');)
+          if (!squeeze(item).empty()) used.insert(squeeze(item));
+      }
+      for (const auto& [k, v] : Ini::parse(std::string("[keyboard]\n") + kKeyboardDefaults).entries("keyboard")) {
+        if (ini.get("keyboard", k)) continue;
+        std::string keep;
+        std::istringstream items(v);
+        for (std::string item; std::getline(items, item, ',');) {
+          std::string t = item;
+          while (!t.empty() && t.front() == ' ') t.erase(t.begin());
+          while (!t.empty() && t.back() == ' ') t.pop_back();
+          if (t.empty() || used.count(squeeze(t))) continue;
+          keep += (keep.empty() ? "" : ", ") + t;
+        }
+        ini.set("keyboard", k, keep);
+        changed = true;
+      }
     }
     if (!ini.has_section("menu")) {  // files from before the menu keys: the section with its notes
       std::string head = kMenuHead;

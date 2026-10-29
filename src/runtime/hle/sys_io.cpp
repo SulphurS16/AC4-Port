@@ -63,7 +63,7 @@ u32 g_seen_release[kPorts] = {};    // sysdlg::released_count() at the previous 
 
 u8 axis(SHORT v) { return u8(std::clamp((int(v) + 32768) >> 8, 0, 255)); }
 
-PadState read_port(u32 port) {
+PadState read_port(u32 port, bool deliver = false) {
   PadState s;
   XINPUT_STATE xs{};  // the controller in this slot, in XInput's layout (gamepads.h)
   bool xin = !input_isolated() && pads::get(int(port), &xs);
@@ -102,7 +102,7 @@ PadState read_port(u32 port) {
   if (port == 0) {
     // Keyboard and mouse bindings (bindings.h; always available on port 0).
     s.connected = true;
-    bindings::PadOut k = bindings::sample();
+    bindings::PadOut k = bindings::sample(deliver);
     s.d1 |= k.d1;
     s.d2 |= k.d2;
     game::menu_pad_bits(&s.d1, &s.d2);  // clicks, right clicks and the wheel in the game's menus
@@ -159,7 +159,7 @@ s32 cellPadGetData(u32 port, Ptr<PadData> data) {
   std::lock_guard lk(g_mu);
   if (!g_init) return PAD_ERR_UNINITIALIZED;
   if (port >= g_max || !data) return PAD_ERR_INVALID_PARAMETER;
-  PadState s = read_port(port);
+  PadState s = read_port(port, true);
   if (!s.connected) return PAD_ERR_NO_DEVICE;
   ui::PadMode ui_mode = ui::pad_mode();
   const bool held = sysdlg::active() || ui_mode != ui::PadMode::Normal;

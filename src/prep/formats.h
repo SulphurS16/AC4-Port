@@ -1,6 +1,5 @@
-// Local preparation: PARAM.SFO, PRX relocation, the keyless import of the player's decrypted files
-// and SPU code records; in development builds also the key-based path (retail PKG, SELF, system
-// software), which the release does not contain.
+// Local preparation: PARAM.SFO, PRX relocation, the import of the player's decrypted files and SPU
+// code records.
 #pragma once
 #include <map>
 #include <string>

@@ -1,7 +1,5 @@
-// Thin wrappers over Windows CNG (bcrypt): hashes for checking the player's files and, in
-// development builds only, the AES primitives and key file of the key-based preparation path
-// (players supply files they decrypted themselves; the release decrypts nothing). All functions
-// throw std::runtime_error on failure.
+// Thin wrappers over Windows CNG (bcrypt): the hashes that check the player's files. All
+// functions throw std::runtime_error on failure.
 #pragma once
 #include <array>
 #include <map>

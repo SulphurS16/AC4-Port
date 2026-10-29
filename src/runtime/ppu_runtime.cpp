@@ -32,6 +32,24 @@ void notify_slow() {
   WakeByAddressAll(&g_seq);
 }
 
+u32 host_processors() {
+  static std::atomic<u32> count{0};
+  static std::atomic<u64> next_ms{0};
+  u64 now = GetTickCount64();
+  if (now >= next_ms.load(std::memory_order_relaxed)) {
+    next_ms.store(now + 1000, std::memory_order_relaxed);
+    DWORD_PTR mask = 0, sys = 0;
+    u32 n = GetProcessAffinityMask(GetCurrentProcess(), &mask, &sys) ? u32(__builtin_popcountll(u64(mask))) : 0;
+    if (!n) {
+      SYSTEM_INFO si;
+      GetSystemInfo(&si);
+      n = si.dwNumberOfProcessors;
+    }
+    count.store(n ? n : 1, std::memory_order_relaxed);
+  }
+  return count.load(std::memory_order_relaxed);
+}
+
 std::atomic<int> g_watch_ranges{0};
 namespace {
 struct WatchEntry {

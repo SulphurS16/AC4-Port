@@ -36,7 +36,8 @@ struct Config {
   static constexpr bool spu_collect = false, shader_collect = false, spu_interp = false, dump_shaders = false;
   static constexpr unsigned trace_rsx = 0, skip_fp = 0, trace_spu_limit = 0, trace_spu_cats = 0;
   static constexpr long shot_surface = -1;
-  static constexpr bool isolate_input = false, no_activate = false, gpu_submit_thread = true, audio_capture = false, gcm_wait_spin = false;
+  static constexpr bool isolate_input = false, no_activate = false, hidden_window = false, gpu_submit_thread = true, audio_capture = false,
+                        gcm_wait_spin = false;
   static constexpr bool verify_native = false, texture_bc = true;
   static constexpr int gpu_timing = 0;
   static constexpr unsigned long long affinity = 0;

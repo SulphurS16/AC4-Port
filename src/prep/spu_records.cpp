@@ -39,8 +39,8 @@ SpuRecordStats rebuild_spu_records(const fs::path& manifest, const fs::path& pre
   SpuRecordStats st;
   std::map<u32, std::vector<u8>> sources;  // index -> file contents (only sources whose hash matches)
   std::map<u32, std::string> source_names;
-  // The manifest lists a file once per input version (system software 2.41 / 4.93 modules); a
-  // file is reported only when none of its versions matches.
+  // The manifest lists a file once per system software version it was recorded from; a file is
+  // reported only when none of its versions matches.
   std::map<std::string, std::string> unmatched;  // path -> note
   std::set<std::string> matched;
   std::string line;

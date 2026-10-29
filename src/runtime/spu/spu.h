@@ -113,7 +113,13 @@ struct Thread {
   u32 exit_status = 0;
   bool thread_exited = false;  // stopped through stop 0x102 (exit status readable)
   std::atomic<bool> stop_request{false};
+  // The host thread, created at the group's first start and kept across restarts (SPURS kernels
+  // that exit when idle are restarted many times a second during movies): it waits on host_cv for
+  // host_go, runs the program, reports the stop, and waits again until host_quit (group destroy).
   void* host = nullptr;
+  std::mutex host_m;
+  std::condition_variable host_cv;
+  bool host_go = false, host_busy = false, host_quit = false;
   u64 steps = 0;
   std::atomic<u32> wait_ch{~0u};  // channel the thread is blocked on (diagnostics)
   // Diagnostics: sampled program counters and the most recent MFC commands.
@@ -194,6 +200,12 @@ u32 channel_count(Thread& t, u32 ch);
 u32 check_interrupt(Thread& t, u32 next);
 // True if a masked event is pending and unread (bisled condition).
 bool event_pending(Thread& t);
+// Blocks until an event is pending (the interrupt condition) or the thread is asked to stop, as a
+// SPU_RdEventStat read waits: for an SPU parked on a branch to itself with interrupts enabled.
+void idle_until_event(Thread& t);
+// An SPU on a branch to itself with interrupts disabled waits for something outside to stop it
+// (a group terminate; SPURS kernels park this way): a short sleep per pass instead of a spin.
+void park_self_branch(Thread& t);
 void write_out_intr_mbox(Thread& t, u32 v);  // LV2 SPU event protocol (§7.5)
 // stop/stopd: returns false if the thread must terminate.
 bool stop_and_signal(Thread& t, u32 code);

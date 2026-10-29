@@ -571,9 +571,11 @@ inline v128 map32(const v128& a, F f) {
     return true;         \
   }
 // Taken backward branch inside a chunk: give the dispatcher a chance to stop or deliver
-// interrupts before looping.
+// interrupts before looping. A branch to itself with interrupts disabled can only end from
+// outside (a stop): it sleeps briefly per pass (rt::spu::park_self_branch).
 #define SPU_BACKEDGE(target, label)                                                  \
   {                                                                                  \
     if (t.stop_request.load(std::memory_order_relaxed) || t.int_enabled) SPU_EXIT(target) \
+    if ((target) == pc) ::rt::spu::park_self_branch(t);                              \
     goto label;                                                                      \
   }

@@ -51,6 +51,9 @@ inline u32 begin_wait() {
 }
 void wait(u32 seq, u64 timeout_us);
 inline void end_wait() { g_waiters.fetch_sub(1, std::memory_order_seq_cst); }
+// Logical processors this process may run on (its affinity mask; re-read about once a second):
+// waiters spin and yield less where the threads they wait for need those processors.
+u32 host_processors();
 
 // Diagnostics (--watch-lines): a ring of the atomic operations on watched address ranges, written
 // to the log at shutdown. kind: 'C' PPU conditional store, 'G' GETLLAR, 'P' PUTLLC, 'U' PUTLLUC.

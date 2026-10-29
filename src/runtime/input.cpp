@@ -12,23 +12,33 @@
 namespace rt {
 namespace {
 std::atomic<bool> g_keys[256];
+std::atomic<bool> g_key_taps[256];      // went down since the pad data last took them (input_taps_take)
 std::atomic<bool> g_focus{true};
 std::atomic<s64> g_mouse_dx{0}, g_mouse_dy{0};
 std::atomic<s32> g_wheel{0};
 std::atomic<u32> g_mouse_buttons{0};
+std::atomic<u32> g_mouse_taps{0};       // buttons that went down since then
 std::atomic<bool> g_captured{false};
 s32 g_abs_x = -1, g_abs_y = -1;  // last absolute position (remote desktop, tablets)
+
+void set_key(u32 vk, bool down) {
+  g_keys[vk] = down;
+  if (down) g_key_taps[vk] = true;
+}
 }  // namespace
 
 namespace gpu {
 void input_key(u32 vk, bool down) {
-  if (vk < 256 && !input_isolated()) g_keys[vk] = down;
+  if (vk < 256 && !input_isolated()) set_key(vk, down);
 }
 void input_focus(bool focused) {
   if (input_isolated()) return;
   g_focus = focused;
-  if (!focused)
+  if (!focused) {
     for (auto& k : g_keys) k = false;
+    for (auto& k : g_key_taps) k = false;
+    g_mouse_taps = 0;
+  }
 }
 void input_mouse_raw(u16 flags, s32 x, s32 y, u16 bf, u16 bd) {
   if (!g_captured || input_isolated()) return;
@@ -47,17 +57,20 @@ void input_mouse_raw(u16 flags, s32 x, s32 y, u16 bf, u16 bd) {
     g_mouse_dx += x;
     g_mouse_dy += y;
   }
-  u32 b = g_mouse_buttons.load();
+  u32 b = g_mouse_buttons.load(), pressed = 0;
   for (int i = 0; i < 5; ++i) {
+    if (bf & (1u << (2 * i))) pressed |= 1u << i;
     if (bf & (1u << (2 * i))) b |= 1u << i;
     if (bf & (2u << (2 * i))) b &= ~(1u << i);
   }
   g_mouse_buttons = b;
+  if (pressed) g_mouse_taps |= pressed;
   if (bf & RI_MOUSE_WHEEL) g_wheel += s16(bd);
 }
 void input_mouse_capture(bool captured) {
   g_captured = captured;
   g_mouse_buttons = 0;
+  g_mouse_taps = 0;
   g_abs_x = g_abs_y = -1;
   LOG_I("input", "mouse %s", captured ? "captured (F1 releases it)" : "released");
 }
@@ -65,10 +78,15 @@ void input_mouse_capture(bool captured) {
 
 bool input_isolated() { return cfg().isolate_input; }
 void input_key_inject(u32 vk, bool down) {
-  if (vk < 256) g_keys[vk] = down;
+  if (vk < 256) set_key(vk, down);
 }
 bool input_key_down(u32 vk) { return vk < 256 && g_keys[vk].load(); }
 bool input_has_focus() { return g_focus.load(); }
+
+void input_taps_take(std::array<bool, 256>* keys, u32* mouse_buttons) {
+  for (size_t i = 0; i < 256; ++i) (*keys)[i] = g_key_taps[i].load(std::memory_order_relaxed) && g_key_taps[i].exchange(false);
+  *mouse_buttons = g_mouse_taps.exchange(0);
+}
 
 void input_mouse_take(s64* dx, s64* dy) {
   *dx = g_mouse_dx.exchange(0);
@@ -83,8 +101,12 @@ void input_mouse_inject(s64 dx, s64 dy) {
 }
 void input_mouse_button_inject(int i, bool down) {
   if (i < 0 || i >= 5) return;
-  if (down) g_mouse_buttons |= 1u << i;
-  else g_mouse_buttons &= ~(1u << i);
+  if (down) {
+    g_mouse_buttons |= 1u << i;
+    g_mouse_taps |= 1u << i;
+  } else {
+    g_mouse_buttons &= ~(1u << i);
+  }
 }
 
 }  // namespace rt

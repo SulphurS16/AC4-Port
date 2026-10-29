@@ -95,7 +95,8 @@ u64 g_frame = 0;
 struct RenderStats {
   u64 draws = 0, vcached = 0, vconverted = 0, tex_hashed = 0, tex_uploaded = 0, surfaces = 0, target_binds = 0, collections = 0,
       bytes_queried = 0, vertices = 0, max_draw_vertices = 0, vbytes = 0, query_calls = 0, query_ticks = 0, query_written = 0,
-      cond_draws = 0, cond_skipped = 0, zpass_reports = 0, zcull_reports = 0;
+      cond_draws = 0, cond_skipped = 0, zpass_reports = 0, zcull_reports = 0, depth_copies = 0, l2_invalidates = 0, depth_write_draws = 0,
+      blended_depth_writes = 0;
 };
 RenderStats g_rs, g_rs_last;
 
@@ -162,6 +163,9 @@ struct Surface {
   ID3D11ShaderResourceView* srv = nullptr;
   u64 last_frame = 0;
   u64 written = 0;  // serial of the last draw/clear that targeted it
+  // Serial of the last draw/clear that changed it without also reading it as a texture (depth
+  // surfaces: the scene's depth, which the copy for depth reads shows; depth_as_color).
+  u64 written_plain = 0;
   // Copy for draws that sample the surface they render to (feedback), refreshed when written.
   ID3D11Texture2D* copy = nullptr;
   ID3D11ShaderResourceView* copy_srv = nullptr;
@@ -172,6 +176,8 @@ struct Surface {
   ID3D11RenderTargetView* as_color_rtv = nullptr;
   ID3D11ShaderResourceView* as_color_srv = nullptr;
   u64 as_color_serial = ~0ull;
+  u64 as_color_frame = 0;  // the frame of the latest copies, and how many in it
+  u32 as_color_count = 0;
 };
 std::vector<Surface*> g_surfaces;
 // Index of g_surfaces by address (one surface per location and offset): lookups per draw for the
@@ -327,6 +333,7 @@ Surface* get_surface(u32 location, u32 offset, u32 format, u32 gw, u32 gh, bool 
   if (old) {
     stretch_copy(old, s);
     s->written = old->written;
+    s->written_plain = old->written_plain;
     destroy(old);
   }
   LOG_D("gpu", "surface %s %ux%u fmt %u at %s 0x%08x", depth ? "depth" : "color", w, h, format, location ? "main" : "local",
@@ -536,8 +543,8 @@ void clear_surface(u32 mask) {
     }
   }
   ++g_write_serial;
-  for (u32 i = 0; i < t.count; ++i) t.color[i]->written = g_write_serial;
-  if (t.depth) t.depth->written = g_write_serial;
+  for (u32 i = 0; i < t.count; ++i) t.color[i]->written = t.color[i]->written_plain = g_write_serial;
+  if (t.depth) t.depth->written = t.depth->written_plain = g_write_serial;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1063,7 +1070,21 @@ void fullscreen_pass(ID3D11RenderTargetView* out, u32 w, u32 h, ID3D11VertexShad
   shadow_reset();
 }
 
+// The depth surface the current draw reads as a texture (its depth writes leave the copy alone).
+Surface* g_draw_reads_depth = nullptr;
+
+// A depth surface read as a color texture (soft particles, explosions' heat haze, ...): a copy of
+// its D24S8 bits as A8R8G8B8 texels (D3D11 cannot sample the surface a draw writes). ELIMINATION's
+// missile explosions (GitHub issue #2) alternate effect draws that read the depth with draws that
+// write it, up to 433 full-screen copies in a frame (run 20261029-160433; 846 draws, 456 writing
+// depth; the game never invalidates the texture cache between them, so on the RSX these reads see
+// whatever the cache holds, not each draw's latest depth). The copy is redone when the scene's
+// depth changed: a clear, or an opaque draw that wrote depth without reading it; effects (blended
+// draws, and draws reading the depth themselves) leave it alone. And a frame makes at most
+// kDepthCopiesPerFrame copies of a surface; later reads in that frame use the latest.
+constexpr u32 kDepthCopiesPerFrame = 8;
 ID3D11ShaderResourceView* depth_as_color(Surface* s) {
+  g_draw_reads_depth = s;
   if (s->format != 2 || !s->stencil_srv) {
     warn_once("z16-as-color", "16-bit depth sampled with a color format: raw depth used");
     return s->srv;
@@ -1092,7 +1113,16 @@ ID3D11ShaderResourceView* depth_as_color(Surface* s) {
     dev->CreateRenderTargetView(s->as_color, nullptr, &s->as_color_rtv);
     dev->CreateShaderResourceView(s->as_color, nullptr, &s->as_color_srv);
   }
-  if (s->as_color_serial == s->written) return s->as_color_srv;
+  if (s->as_color_serial != ~0ull) {
+    if (s->as_color_serial >= s->written_plain) return s->as_color_srv;
+    if (s->as_color_frame == g_frame && s->as_color_count >= kDepthCopiesPerFrame) return s->as_color_srv;
+  }
+  if (s->as_color_frame != g_frame) {
+    s->as_color_frame = g_frame;
+    s->as_color_count = 0;
+  }
+  ++s->as_color_count;
+  ++g_rs.depth_copies;
   gpu::timing::mark(ac4::strprintf("depth as color %ux%u", s->width, s->height));
   fullscreen_pass(s->as_color_rtv, s->width, s->height, g_d2c_vs, g_d2c_ps, s->srv, s->stencil_srv, nullptr);
   gpu::timing::mark(g_rt_label);
@@ -2263,6 +2293,7 @@ void flush_draw() {
   phase_switch(kPhTextures);
   ID3D11ShaderResourceView* srvs[16] = {};
   ID3D11SamplerState* smps[16] = {};
+  g_draw_reads_depth = nullptr;  // depth_as_color notes this draw's depth read
   for (u32 u = 0; u < 16; ++u) {
     if (!((ps->info.tex_mask >> u) & 1) || !tex[u].enabled) continue;
     srvs[u] = texture_view(tex[u], fst.tex_scale[u]);
@@ -2339,8 +2370,14 @@ void flush_draw() {
   gpu::rec().kick();
   ++g_rs.draws;
   ++g_write_serial;
-  for (u32 i = 0; i < t.count; ++i) t.color[i]->written = g_write_serial;
-  if (depth_changed(t)) t.depth->written = g_write_serial;
+  for (u32 i = 0; i < t.count; ++i) t.color[i]->written = t.color[i]->written_plain = g_write_serial;
+  if (depth_changed(t)) {
+    t.depth->written = g_write_serial;
+    if (g_draw_reads_depth != t.depth && !reg(m::SET_BLEND_ENABLE)) t.depth->written_plain = g_write_serial;  // opaque, not reading it (depth_as_color)
+    ++g_rs.depth_write_draws;
+    if (reg(m::SET_BLEND_ENABLE)) ++g_rs.blended_depth_writes;
+  }
+  g_draw_reads_depth = nullptr;
 }
 
 void fr_clear(const Targets&, u32) {}
@@ -2709,19 +2746,28 @@ void present_buffer(u32 id, const DisplayBuffer& b) {
   tex_trim();
   surface_trim();
   g_writes_stale = true;
+  static u64 copies_at = 0, copies_max = 0;  // depth copies in a frame: the most over the window
+  copies_max = std::max(copies_max, g_rs.depth_copies - copies_at);
+  copies_at = g_rs.depth_copies;
   if (g_frame && g_frame % 300 == 0) {
+    if (copies_max > 0) LOG_I("perf", "depth copies: at most %llu in a frame", (unsigned long long)copies_max);
+    copies_max = 0;
     auto pf = [](u64 RenderStats::*f) { return double(g_rs.*f - g_rs_last.*f) / 300.0; };
     u64 surf_bytes = 0;
     for (const Surface* s : g_surfaces) surf_bytes += surface_bytes(s);
     LOG_I("perf",
           "per frame: %.0f draws (%.1f conditional, %.1f of them skipped; %.1f pixel count and %.1f zcull reports; vertex data %.0f cached, %.0f uploaded: %.0f KiB, element span %.0f), textures %.1f hashed "
-          "%.1f uploaded, %.2f surfaces created, %.1f target changes, %.1f collections (%.0f write queries over %.0f MiB, "
+          "%.1f uploaded, %.2f surfaces created, %.1f target changes, %.1f depth copies (%.1f draws writing depth, %.1f of them "
+          "blended), %.1f texture cache invalidations, "
+          "%.1f collections (%.0f write queries over %.0f MiB, "
           "%.2f ms, %.0f pages written); static vertex data %zu entries %.0f MiB; textures %zu %.0f MiB; surfaces %zu %.0f MiB",
           pf(&RenderStats::draws), pf(&RenderStats::cond_draws), pf(&RenderStats::cond_skipped), pf(&RenderStats::zpass_reports),
           pf(&RenderStats::zcull_reports), pf(&RenderStats::vcached),
           pf(&RenderStats::vconverted), pf(&RenderStats::vbytes) / 1024.0,
           pf(&RenderStats::vertices), pf(&RenderStats::tex_hashed), pf(&RenderStats::tex_uploaded), pf(&RenderStats::surfaces),
-          pf(&RenderStats::target_binds), pf(&RenderStats::collections), pf(&RenderStats::query_calls),
+          pf(&RenderStats::target_binds), pf(&RenderStats::depth_copies), pf(&RenderStats::depth_write_draws),
+          pf(&RenderStats::blended_depth_writes), pf(&RenderStats::l2_invalidates), pf(&RenderStats::collections),
+          pf(&RenderStats::query_calls),
           pf(&RenderStats::bytes_queried) / 1048576.0, pf(&RenderStats::query_ticks) * g_ms_per_tick, pf(&RenderStats::query_written),
           g_streams.size() + g_index_lists.size(), g_vdata_bytes / 1048576.0, g_tex.size(), g_tex_bytes / 1048576.0,
           g_surfaces.size(), surf_bytes / 1048576.0);
@@ -2898,6 +2944,9 @@ void renderer_method(u32 ri, u32 arg, u32 count, u32 index) {
       return;
     case m::CLEAR_REPORT_VALUE:
       if (arg == 1) zpass_clear();
+      return;
+    case m::INVALIDATE_L2:  // the texture cache: counted (per frame statistics)
+      ++g_rs.l2_invalidates;
       return;
     default:
       return;

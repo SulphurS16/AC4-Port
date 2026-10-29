@@ -253,7 +253,7 @@ int main(int argc, char** argv) {
   }
   lv2_init();
   if (!c.headless) gpu::window_dpi_aware();
-  if (!c.headless && !gpu::window_create("ARMORED CORE 4", c.window_w, c.window_h, true)) {
+  if (!c.headless && !gpu::window_create("ARMORED CORE 4", c.window_w, c.window_h, !c.hidden_window)) {
     LOG_E("main", "window creation failed; running without presentation");
   } else if (!c.headless) {
     ac4::settings::Display d = settings::display();

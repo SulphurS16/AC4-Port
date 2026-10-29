@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <string>
 
 #include "common/bytes.h"
@@ -7,6 +8,10 @@ namespace rt {
 
 bool input_key_down(u32 vk);  // Windows virtual-key code
 bool input_has_focus();
+// Keys and mouse buttons (bit i: button i) that went down since the previous call: a press and
+// release between two pad reads still reaches the game once. The pad read that hands the game its
+// data takes them (bindings::sample).
+void input_taps_take(std::array<bool, 256>* keys, u32* mouse_buttons);
 // A guest thread started (scripted input can be anchored to thread starts).
 void input_thread_started(const std::string& name);
 // "quit" was written to the --control file.

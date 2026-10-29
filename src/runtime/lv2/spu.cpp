@@ -122,29 +122,55 @@ s32 sys_spu_thread_set_argument(u32 id, Ptr<ThreadArg> arg) {
 
 DWORD WINAPI spu_host_thread(LPVOID p) {
   auto* t = static_cast<spu::Thread*>(p);
-  spu::run_thread(*t);
-  spu::on_thread_stopped(*t);
-  spu::Group* g = t->group;
-  bool last = false;
-  {
-    std::lock_guard lk(g->m);
-    t->state = 2;
-    if (g->running) --g->running;
-    if (!g->running) {
-      if (!g->join_cause) {
-        g->join_cause = spu::JOIN_ALL_THREADS_EXIT;
-        g->exit_status = 0;
+  for (;;) {
+    {
+      std::unique_lock lk(t->host_m);
+      t->host_cv.wait(lk, [&] { return t->host_go || t->host_quit; });
+      if (t->host_quit) return 0;
+      t->host_go = false;
+    }
+    spu::run_thread(*t);
+    spu::on_thread_stopped(*t);
+    spu::Group* g = t->group;
+    bool last = false;
+    {
+      std::lock_guard lk(g->m);
+      t->state = 2;
+      if (g->running) --g->running;
+      if (!g->running) {
+        if (!g->join_cause) {
+          g->join_cause = spu::JOIN_ALL_THREADS_EXIT;
+          g->exit_status = 0;
+        }
+        g->run_state = spu::GROUP_INITIALIZED;  // can be restarted
+        g->stop_latched = true;
+        last = true;
       }
-      g->run_state = spu::GROUP_INITIALIZED;  // can be restarted
-      g->stop_latched = true;
-      last = true;
+    }
+    {
+      std::lock_guard lk(t->host_m);
+      t->host_busy = false;
+    }
+    t->host_cv.notify_all();
+    if (last) {
+      g->cv.notify_all();
+      LOG_D("spu", "SPU group 0x%x '%s' stopped (cause %u, status 0x%x)", g->id, g->name.c_str(), g->join_cause, g->exit_status);
     }
   }
-  if (last) {
-    g->cv.notify_all();
-    LOG_D("spu", "SPU group 0x%x '%s' stopped (cause %u, status 0x%x)", g->id, g->name.c_str(), g->join_cause, g->exit_status);
+}
+
+// Ends a thread's host thread (group destroy).
+void quit_host(spu::Thread& t) {
+  if (!t.host) return;
+  {
+    std::lock_guard lk(t.host_m);
+    t.host_quit = true;
   }
-  return 0;
+  t.host_cv.notify_all();
+  WaitForSingleObject(static_cast<HANDLE>(t.host), INFINITE);
+  CloseHandle(static_cast<HANDLE>(t.host));
+  prof::unregister_thread(t.host);
+  t.host = nullptr;
 }
 
 void stop_threads(spu::Group& g) {
@@ -172,10 +198,9 @@ s32 sys_spu_thread_group_start(u32 id) {
     run_queue = g->event_queue[0];
     for (auto& tp : g->threads) {
       spu::Thread& t = *tp;
-      if (t.host) {  // previous run's host thread has finished (the group was stopped)
-        WaitForSingleObject(static_cast<HANDLE>(t.host), INFINITE);
-        CloseHandle(static_cast<HANDLE>(t.host));
-        t.host = nullptr;
+      {  // the previous run's host thread has reported its stop (it does not need g->m for that)
+        std::unique_lock hl(t.host_m);
+        t.host_cv.wait(hl, [&] { return !t.host_busy; });
       }
       spu::prepare_start(t);
       if (spu::trace_on(t, 4)) LOG_I("spu-trace", "%s group start (entry 0x%x)", t.name.c_str(), t.entry);
@@ -187,12 +212,20 @@ s32 sys_spu_thread_group_start(u32 id) {
   if (run_queue) event_queue_send(run_queue, SYS_SPU_THREAD_GROUP_EVENT_RUN_KEY, id, 0, 0);
   for (auto& tp : g->threads) {
     spu::Thread& t = *tp;
-    DWORD hid = 0;
-    HANDLE h = CreateThread(nullptr, 16u << 20, spu_host_thread, &t, STACK_SIZE_PARAM_IS_A_RESERVATION, &hid);
-    t.host = h;
-    std::wstring wn(t.name.begin(), t.name.end());
-    SetThreadDescription(h, (L"spu:" + wn).c_str());
-    prof::register_thread("spu:" + t.name, h);
+    if (!t.host) {  // the first start: the host thread stays for later starts
+      DWORD hid = 0;
+      HANDLE h = CreateThread(nullptr, 16u << 20, spu_host_thread, &t, STACK_SIZE_PARAM_IS_A_RESERVATION, &hid);
+      t.host = h;
+      std::wstring wn(t.name.begin(), t.name.end());
+      SetThreadDescription(h, (L"spu:" + wn).c_str());
+      prof::register_thread("spu:" + t.name, h);
+    }
+    {
+      std::lock_guard hl(t.host_m);
+      t.host_go = true;
+      t.host_busy = true;
+    }
+    t.host_cv.notify_all();
   }
   LOG_D("spu", "SPU group 0x%x '%s' started", id, g->name.c_str());
   return CELL_OK;
@@ -251,11 +284,7 @@ s32 sys_spu_thread_group_destroy(u32 id) {
   }
   for (auto& t : g->threads)
     if (t) {
-      if (t->host) {
-        WaitForSingleObject(static_cast<HANDLE>(t->host), INFINITE);
-        CloseHandle(static_cast<HANDLE>(t->host));
-        t->host = nullptr;
-      }
+      quit_host(*t);
       g_spu_threads.remove(t->id);
     }
   g_spu_groups.remove(id);

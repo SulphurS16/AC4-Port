@@ -1,7 +1,6 @@
 MIT License
 
 Copyright (c) 2026 SulphurS16 and the Armored Core 4 native port contributors
-(includes code from the ACFA native port by the same author, under this license)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,7 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-This license covers the source code in this repository only. It grants nothing
-for Armored Core 4 or any other game data, keys or system software,
-which users must supply themselves.

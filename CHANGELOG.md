@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.6.0 (2026-10-29)
+
+Two mouse modes, keys under every key type, the mouse in the garage, movies on two-core PCs, and
+fixes for the SIMULATOR and ELIMINATION (GitHub issues #1 and #2). Most of it follows the ACFA
+port's 0.7.3.
+
+Updating from 0.5.x: unzip the new release and start its launcher, then click **Set up**: it
+rebuilds what changed (this time also a part of the game's code), which takes a few minutes.
+
+Mouse and keyboard
+- **MOUSE MODE: STICK**, the new default (PC SETTINGS > KEYBOARD / MOUSE): the mouse works like a
+  precise right stick. The AC turns exactly as far as the mouse moves, as fast as it can turn, and
+  a quick flick turns the whole way (up to half a turn) instead of a few degrees; looking up and
+  down works the same way.
+- **MOUSE MODE: CAMERA**: the earlier free mouse camera. Now only the camera turns freely:
+  lock-on, firing, the radar and movement stay with the AC's front as in the game, so it no longer
+  locks on to or shoots at targets beside or behind it.
+- Fixed: in the SIMULATOR the mouse did not turn or look (GitHub issue #1). Both modes work there.
+- Keys keep their actions under every key type: with TYPE B or CUSTOM A / B the keys still fire
+  the weapon, boost and so on that they do with TYPE A. PC SETTINGS shows the button each key
+  presses in missions.
+- New keys: **PURGE RIGHT / LEFT / SHOULDER WEAPON** (both weapon switches and the weapon's button
+  together, as on the controller). No keys until you choose them in PC SETTINGS.
+- Keys and mouse buttons pressed and released within one frame are no longer lost.
+
+Menus
+- The mouse in the garage: ASSEMBLY and WEAPON (click a slot to pick it, the part shown to equip
+  it, the picker's ◀ ▶ or the wheel over it to go through the parts, the < > at the top for the
+  next page), the ◀ ▶ arrows of option rows (CONTROL OPTIONS, the COPY dialog's CATEGORY, ...),
+  PAINT's menus and the SIMULATOR's lists. Still by keys: PAINT's color sliders, the tiles of the
+  postgame MISSION LIST, STABILIZER.
+- Fixed: right after loading a save, the postgame MISSION LIST was taken for a screen without a
+  menu, so Enter or a click pressed START (the KEY GUIDE) instead of choosing. Menus are now also
+  recognised while they open or have nothing highlighted yet.
+
+Performance
+- Fixed: severe frame drops in ELIMINATION (Hard) whenever the Normals' missiles explode (GitHub
+  issue #2). The port copied the depth buffer for every explosion effect, up to 433 times in a
+  frame; now once per frame (the explosions look the same).
+- Movies (the opening, briefings) play at full speed with working sound on PCs with two processor
+  cores: there the opening ran at 20 to 30 frames per second with broken sound; now 60.
+
+PC SETTINGS
+- Long captions (MOUSE SENSITIVITY X / Y) and the render scale's resolution are no longer cut off.
+
+## 0.5.1 (2026-10-17)
+
+- **License notices.** The mingw-w64 runtime built into the launcher now has its notice in the release (in `licenses/` and at the end of the zip's README.txt), and `LICENSE` is the standard MIT text, so GitHub shows the project as MIT.
+- **README.** The zip's README.txt follows the README on GitHub.
+- No changes to the game. Updating from 0.5.0: start the new launcher and click **Set up**; it rebuilds a few files.
+
 ## 0.5.0 (2026-10-16)
 
 PlayStation controllers, and a quieter launcher.

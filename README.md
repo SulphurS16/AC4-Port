@@ -12,7 +12,7 @@ Not affiliated with, endorsed or sponsored by FromSoftware, SEGA, Sony Interacti
 - Resolution options. The game draws at your screen's own resolution, in borderless, windowed or fullscreen.
 - Render scale from 50% to 200%.
 - High frame rates. 30, 60, 120, 144, your monitor's refresh rate or uncapped and the same game speed at every frame rate. Menus and movies stay at 60.
-- Full mouse support. The mouse moves the camera with raw input. Your AC turns after it at its own speed, as with the stick.
+- Full mouse support. The mouse works like a precise right stick with raw input: your AC turns exactly as far as the mouse moves. Or MOUSE MODE: CAMERA, a free camera your AC turns after.
 - PC SETTINGS inside the game. A row the port adds to the game's own SYSTEM menu: display, frame rate, mouse and keys settings all ingame.
 
 <img width="2560" height="1440" alt="acfa_Yv4vGErYvv" src="https://github.com/user-attachments/assets/6a63daac-5396-4723-833d-4b9519c8006d" />
@@ -75,7 +75,7 @@ Keyboard and mouse in missions (defaults, for the game's control TYPE A):
 | Action | Keys |
 | --- | --- |
 | Move | W A S D |
-| Camera | Mouse |
+| Turn and look | Mouse |
 | Turn and look with keys | I J K L (or numpad 8 4 5 6) |
 | Left / right arm weapon | Left / right click |
 | Shoulder weapon | C |
@@ -88,7 +88,7 @@ Keyboard and mouse in missions (defaults, for the game's control TYPE A):
 | Release / take the mouse | F1 |
 | Fullscreen | F11 or Alt+Enter |
 
-The mouse moves the camera directly (raw input), and the AC turns after it at its own speed.
+The mouse works like a precise right stick (raw input): the AC turns exactly as far as the mouse moves, as fast as it can turn. **PC SETTINGS > MOUSE MODE: CAMERA** turns only the camera, at once, and the AC turns after it; lock-on, firing and movement stay with the AC's front. The keys keep their actions under every KEY TYPE, and the purges (right, left, shoulder weapon) can have keys of their own.
 
 In menus:
 - **Mouse:** point and click; right-click goes back; the wheel scrolls.
