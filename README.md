@@ -12,7 +12,7 @@ Not affiliated with, endorsed or sponsored by FromSoftware, SEGA, Sony Interacti
 - Resolution options. The game draws at your screen's own resolution, in borderless, windowed or fullscreen.
 - Render scale from 50% to 200%.
 - High frame rates. 30, 60, 120, 144, your monitor's refresh rate or uncapped and the same game speed at every frame rate. Menus and movies stay at 60.
-- Full mouse support. The mouse works like a precise right stick with raw input: your AC turns exactly as far as the mouse moves. Or MOUSE MODE: CAMERA, a free camera your AC turns after.
+- Full mouse support. By default the mouse works like a precise right stick, with raw input: your AC turns exactly as far as you move it. A camera mode is in PC SETTINGS. The mouse also works in the game's menus, including the ACSIS garage.
 - PC SETTINGS inside the game. A row the port adds to the game's own SYSTEM menu: display, frame rate, mouse and keys settings all ingame.
 
 <img width="2560" height="1440" alt="acfa_Yv4vGErYvv" src="https://github.com/user-attachments/assets/6a63daac-5396-4723-833d-4b9519c8006d" />
@@ -70,7 +70,7 @@ With several controllers connected, the first one plays (Xbox-style controllers 
 
 # Mouse and keyboard support
 
-Keyboard and mouse in missions (defaults, for the game's control TYPE A):
+Keyboard and mouse in missions (defaults). The keys keep these actions under every control type (KEY TYPE):
 
 | Action | Keys |
 | --- | --- |
@@ -88,14 +88,16 @@ Keyboard and mouse in missions (defaults, for the game's control TYPE A):
 | Release / take the mouse | F1 |
 | Fullscreen | F11 or Alt+Enter |
 
-The mouse works like a precise right stick (raw input): the AC turns exactly as far as the mouse moves, as fast as it can turn. **PC SETTINGS > MOUSE MODE: CAMERA** turns only the camera, at once, and the AC turns after it; lock-on, firing and movement stay with the AC's front. The keys keep their actions under every KEY TYPE, and the purges (right, left, shoulder weapon) can have keys of their own.
+The mouse works like a precise right stick (**MOUSE MODE: STICK**, the default): your AC turns exactly as far as you move it, as fast as it can turn. **MOUSE MODE: CAMERA** moves only the camera, freely; the AC turns after it at its own speed, and aims and moves as in the game. Both modes use raw input, with no mouse acceleration.
+
+Not on a key until you choose one in PC SETTINGS: purge right / left / shoulder weapon.
 
 In menus:
-- **Mouse:** point and click; right-click goes back; the wheel scrolls.
+- **Mouse:** point and click; right-click goes back; the wheel scrolls. This includes ACSIS (WEAPON, ASSEMBLY, PAINT, SIMULATOR). PAINT's color sliders, the postgame MISSION LIST's tiles and STABILIZER still use keys.
 - **Keys:** arrows or W A S D move, Enter or Space choose, Escape or Backspace go back.
 - **PS3 buttons:** the game shows these. Tab = START, Q / E = L1 / R1, R or Ctrl = Triangle (GARAGE in the hub), F = Square, Z = L2, X = SELECT.
 
-All keys can be changed in game under **SYSTEM > PC SETTINGS**.
+All keys can be changed in game under **SYSTEM > PC SETTINGS**, which also shows the PS3 button each key presses.
 
 ## Settings and saves
 
