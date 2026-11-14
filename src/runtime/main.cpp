@@ -174,6 +174,7 @@ int main(int argc, char** argv) {
     else if (a == "--fullscreen") c.fullscreen = true;
     else if (a == "--priority") c.priority = next();
     else if (a == "--flash") c.flash = next();  // the launcher's folder for the chosen system software
+    else if (a == "--regulation") c.regulation = next();  // the launcher's Game update row (vfs.h)
     else {
       std::fprintf(stderr, "unknown argument %s\n", a.c_str());
       return 2;

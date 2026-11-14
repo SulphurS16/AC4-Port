@@ -2,7 +2,8 @@
 // 2026-10-15). The launcher copies RPCS3's program files (never its settings or data) into a work
 // folder; that private copy installs the PS3 system software update file the player chose
 // (--installfw) and decrypts the 10 system modules and a copy of the game's EBOOT.BIN
-// (--decrypt). The results go to the launcher's own folder of decrypted files; the work folder is
+// (--decrypt; not when the game folder holds the right EBOOT.elf already, some hold only that).
+// The results go to the launcher's own folder of decrypted files; the work folder is
 // deleted. The player's RPCS3 is not changed, and the port itself contains no keys and decrypts
 // nothing: RPCS3 does. RPCS3's questions are the player's to answer (user decision 2026-10-15):
 // the launcher brings them to the front, says what RPCS3 asks and waits; No, or closing the
@@ -30,6 +31,7 @@ struct Rpcs3Job {
   fs::path rpcs3_exe;   // the player's RPCS3
   fs::path pup;         // PS3UPDAT.PUP of system software 4.93 (unused when RPCS3 has 4.93 already)
   fs::path disc;        // the game folder (PS3_GAME\USRDIR\EBOOT.BIN)
+  fs::path eboot_elf;   // the game's EBOOT.elf, already decrypted and checked (empty: decrypt EBOOT.BIN)
   fs::path work;        // a work folder (deleted afterwards)
   fs::path out;         // the decrypted files go here
 };

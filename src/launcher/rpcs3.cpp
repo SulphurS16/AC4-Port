@@ -451,8 +451,11 @@ void Rpcs3Prep::run(Rpcs3Job job) {
       return finish(false, "RPCS3 could not install the system software from " + narrow(job.pup.filename().wstring()) + (v.empty() ? "." : " (it has " + v + ")."));
   }
 
-  // 3. Copies of the 10 modules and of EBOOT.BIN, decrypted by RPCS3 beside themselves.
-  const std::string decrypting = "Decrypting the system modules and the game's EBOOT.BIN with RPCS3...";
+  // 3. Copies of the 10 modules and of EBOOT.BIN, decrypted by RPCS3 beside themselves (EBOOT.BIN
+  // not when the game folder holds the right EBOOT.elf: a copy of that instead).
+  const bool decrypt_eboot = job.eboot_elf.empty();
+  const std::string decrypting = decrypt_eboot ? "Decrypting the system modules and the game's EBOOT.BIN with RPCS3..."
+                                               : "Decrypting the system modules with RPCS3...";
   set_status(decrypting);
   fs::path stage = job.work / "files";
   fs::create_directories(stage, ec);
@@ -462,9 +465,14 @@ void Rpcs3Prep::run(Rpcs3Job job) {
     args.insert(args.end(), {L"--decrypt", (stage / (m + ".sprx")).wstring()});
   }
   fs::copy_file(ext / ki::kFlashAtrac.name, stage / ki::kFlashAtrac.name, fs::copy_options::overwrite_existing, ec);
-  fs::copy_file(job.disc / "PS3_GAME" / "USRDIR" / "EBOOT.BIN", stage / "EBOOT.BIN", fs::copy_options::overwrite_existing, ec);
+  if (decrypt_eboot) {
+    fs::copy_file(job.disc / "PS3_GAME" / "USRDIR" / "EBOOT.BIN", stage / "EBOOT.BIN", fs::copy_options::overwrite_existing, ec);
+  } else {
+    log("the game's EBOOT.elf is decrypted already (checked): copied, EBOOT.BIN not decrypted");
+    fs::copy_file(job.eboot_elf, stage / "EBOOT.elf", fs::copy_options::overwrite_existing, ec);
+  }
   if (ec) return finish(false, "The files could not be copied for decrypting: " + ec.message());
-  args.insert(args.end(), {L"--decrypt", (stage / "EBOOT.BIN").wstring()});
+  if (decrypt_eboot) args.insert(args.end(), {L"--decrypt", (stage / "EBOOT.BIN").wstring()});
   if (!start_rpcs3(exe, args)) return finish(false, "RPCS3 could not be started.");
   // RPCS3 decrypts without a window and exits; a window it shows meanwhile (a question, an error)
   // is the player's to read and answer, as during the install, and that wait is not timed.

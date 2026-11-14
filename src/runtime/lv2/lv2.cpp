@@ -46,7 +46,7 @@ static void install_update_data() {
 }
 
 void lv2_init() {
-  vfs::init(cfg().disc_root, cfg().hdd0, cfg().hdd1, cfg().flash, cfg().saves, cfg().test_overlay);
+  vfs::init(cfg().disc_root, cfg().hdd0, cfg().hdd1, cfg().flash, cfg().saves, cfg().test_overlay, cfg().regulation);
   ac4::add_protected_root(cfg().flash);
   // The SYSTEM menu with its PC SETTINGS row (the port's copy of the menu's archive).
   if (std::string menu = game::system_menu_archive(cfg().disc_root, cfg().data_dir); !menu.empty())

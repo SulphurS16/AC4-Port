@@ -3,6 +3,10 @@
 //   /dev_hdd0  -> local/hdd0 (writable)         /dev_hdd1 -> local/hdd1 (writable)
 //   /dev_flash -> the dev_flash file(s) imported from the player's RPCS3 (read-only)
 //   /dev_hdd0/home/00000001/savedata -> the player's own save folder when one is given (--user)
+// Mods: files in the mods folder beside the player's saves (vfs.cpp) replace the game's files below
+// the disc's or the game data's USRDIR for reading (writes go to the game's own files; removing one
+// ends its mod for the run); `regulation` (the launcher's Game update row) stands for the game
+// data's regulation.bin.
 // Test aid (--test-overlay DIR): a file present under DIR (same layout as the disc root) is read
 // instead of the disc's; the disc is never modified. Every overlaid file is logged.
 #pragma once
@@ -15,15 +19,16 @@
 namespace rt::vfs {
 
 void init(const std::string& disc_root, const std::string& hdd0, const std::string& hdd1, const std::string& flash,
-          const std::string& saves = "", const std::string& test_overlay = "");
+          const std::string& saves = "", const std::string& test_overlay = "", const std::string& regulation = "");
 
 struct Resolved {
   std::filesystem::path host;
   bool writable = false;
   std::string mount;
 };
-// Returns false for paths outside every mount point (or escaping one with "..").
-bool resolve(const std::string& guest_path, Resolved& out);
+// Returns false for paths outside every mount point (or escaping one with ".."). mods: a mod file
+// stands for the game's (reading; writes go to the game's own files).
+bool resolve(const std::string& guest_path, Resolved& out, bool mods = true);
 
 // A disc file served from another host file: the port's own copy of it (the SYSTEM menu archive
 // with the PC SETTINGS row, game/system_menu.cpp). `disc_relative` is below the disc root

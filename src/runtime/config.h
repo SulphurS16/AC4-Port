@@ -18,6 +18,7 @@ struct Config {
   std::string saves;        // the player's save folder (--user DIR: DIR\savedata), else hdd0's own
   std::string hdd1;         // writable /dev_hdd1 (system cache)
   std::string flash;        // read-only /dev_flash (extracted firmware)
+  std::string regulation;   // --regulation FILE: the launcher's Game update row (a regulation.bin; vfs.h)
   std::string run_dir;      // this run's log/capture directory
   bool warm_shaders = false;        // compile the shader manifest into the shader cache, then exit
   std::string priority;             // process priority class: "" (normal), "above-normal", "high"
@@ -37,7 +38,7 @@ struct Config {
   static constexpr unsigned trace_rsx = 0, skip_fp = 0, trace_spu_limit = 0, trace_spu_cats = 0;
   static constexpr long shot_surface = -1;
   static constexpr bool isolate_input = false, no_activate = false, hidden_window = false, gpu_submit_thread = true, audio_capture = false,
-                        gcm_wait_spin = false;
+                        gcm_wait_spin = false, warp = false;
   static constexpr bool verify_native = false, texture_bc = true;
   static constexpr int gpu_timing = 0;
   static constexpr unsigned long long affinity = 0;

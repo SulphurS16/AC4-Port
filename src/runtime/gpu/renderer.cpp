@@ -96,7 +96,7 @@ struct RenderStats {
   u64 draws = 0, vcached = 0, vconverted = 0, tex_hashed = 0, tex_uploaded = 0, surfaces = 0, target_binds = 0, collections = 0,
       bytes_queried = 0, vertices = 0, max_draw_vertices = 0, vbytes = 0, query_calls = 0, query_ticks = 0, query_written = 0,
       cond_draws = 0, cond_skipped = 0, zpass_reports = 0, zcull_reports = 0, depth_copies = 0, l2_invalidates = 0, depth_write_draws = 0,
-      blended_depth_writes = 0;
+      blended_depth_writes = 0, zconst_draws = 0;
 };
 RenderStats g_rs, g_rs_last;
 
@@ -120,6 +120,7 @@ struct Shadow {
   ID3D11DepthStencilState* depth;
   u32 stencil_ref;
   ID3D11RasterizerState* raster;
+  float vp_zmin, vp_zmax;  // the viewport's depth range (0..1, or one value for constant-depth draws)
   D3D11_RECT scissor;
   ID3D11VertexShader* vs;
   ID3D11PixelShader* ps;
@@ -415,6 +416,8 @@ Targets bind_targets(bool want_depth) {
   gpu::rec().OMSetRenderTargets(t.count, rtvs, dsv);
   D3D11_VIEWPORT vp{0, 0, float(sw), float(shh), 0, 1};
   gpu::rec().RSSetViewports(1, &vp);
+  g_sh.vp_zmin = 0;
+  g_sh.vp_zmax = 1;
   std::memcpy(g_sh.rtv, rtvs, sizeof rtvs);
   g_sh.dsv = dsv;
   g_sh.rt_count = t.count;
@@ -1604,6 +1607,9 @@ bool depth_changed(const Targets& t) {
          writes(m::SET_BACK_STENCIL_OP_FAIL, m::SET_BACK_STENCIL_OP_ZFAIL, m::SET_BACK_STENCIL_OP_ZPASS);
 }
 
+// "gpu zconst on|off" (developer A/B): off clips constant-depth draws by depth, as up to 0.6.0.
+bool g_zconst = true;
+
 void set_pipeline_state(const Targets& t) {
   auto* c = &gpu::rec();
   // Blend.
@@ -1673,7 +1679,19 @@ void set_pipeline_state(const Targets& t) {
     rd.CullMode = cf == 0x0404 ? D3D11_CULL_FRONT : cf == 0x0405 ? D3D11_CULL_BACK : D3D11_CULL_NONE;
   }
   rd.FrontCounterClockwise = reg(m::SET_FRONT_FACE) == 0x0901;
-  rd.DepthClipEnable = (reg(m::SET_ZMIN_MAX_CONTROL) & 0xf) != 0;
+  // A draw whose window depth is constant (viewport z scale 0, as the sky dome and clouds at the
+  // far plane) and inside the clip range is never clipped by depth on the RSX. Its clip-space z
+  // here is window z * w, which puts the near clip plane (z >= 0) on the camera plane (w = 0):
+  // triangles crossing it (a dome around the camera) are clipped differently per GPU (sky
+  // triangles flickering on AMD; WARP shows them too; the ACFA port's GitHub issue #1). Such draws
+  // skip depth clipping (clipping to w > 0 stays) and take their depth from the viewport's depth
+  // range, exactly. A constant outside the clip range shows nothing on the RSX: those stay clipped.
+  const float zoff = f32_of(reg(m::SET_VIEWPORT_OFFSET + 8));
+  const float clo = std::clamp(f32_of(reg(m::SET_CLIP_MIN)), 0.0f, 1.0f), chi = std::clamp(f32_of(reg(m::SET_CLIP_MAX)), 0.0f, 1.0f);
+  const bool zconst = g_zconst && f32_of(reg(m::SET_VIEWPORT_SCALE + 8)) == 0.0f && zoff >= std::min(clo, chi) &&
+                      zoff <= std::max(clo, chi);
+  if (zconst) ++g_rs.zconst_draws;
+  rd.DepthClipEnable = (reg(m::SET_ZMIN_MAX_CONTROL) & 0xf) != 0 && !zconst;
   rd.ScissorEnable = TRUE;
   if (reg(m::SET_POLY_OFFSET_FILL_ENABLE)) {
     rd.DepthBias = INT(f32_of(reg(m::SET_POLYGON_OFFSET_BIAS)));
@@ -1686,6 +1704,14 @@ void set_pipeline_state(const Targets& t) {
   if (rs != g_sh.raster) {
     c->RSSetState(rs);
     g_sh.raster = rs;
+  }
+  float zmin = 0, zmax = 1;
+  if (zconst) zmin = zmax = zoff;  // the constant window z (inside the clip range, so within 0..1)
+  if (zmin != g_sh.vp_zmin || zmax != g_sh.vp_zmax) {
+    D3D11_VIEWPORT vp{0, 0, float(g_sh.vp_w), float(g_sh.vp_h), zmin, zmax};
+    c->RSSetViewports(1, &vp);
+    g_sh.vp_zmin = zmin;
+    g_sh.vp_zmax = zmax;
   }
   D3D11_RECT sr = scissor_rect(t, false);
   if (std::memcmp(&sr, &g_sh.scissor, sizeof sr)) {
@@ -2758,7 +2784,7 @@ void present_buffer(u32 id, const DisplayBuffer& b) {
     LOG_I("perf",
           "per frame: %.0f draws (%.1f conditional, %.1f of them skipped; %.1f pixel count and %.1f zcull reports; vertex data %.0f cached, %.0f uploaded: %.0f KiB, element span %.0f), textures %.1f hashed "
           "%.1f uploaded, %.2f surfaces created, %.1f target changes, %.1f depth copies (%.1f draws writing depth, %.1f of them "
-          "blended), %.1f texture cache invalidations, "
+          "blended), %.1f constant-depth draws, %.1f texture cache invalidations, "
           "%.1f collections (%.0f write queries over %.0f MiB, "
           "%.2f ms, %.0f pages written); static vertex data %zu entries %.0f MiB; textures %zu %.0f MiB; surfaces %zu %.0f MiB",
           pf(&RenderStats::draws), pf(&RenderStats::cond_draws), pf(&RenderStats::cond_skipped), pf(&RenderStats::zpass_reports),
@@ -2766,7 +2792,7 @@ void present_buffer(u32 id, const DisplayBuffer& b) {
           pf(&RenderStats::vconverted), pf(&RenderStats::vbytes) / 1024.0,
           pf(&RenderStats::vertices), pf(&RenderStats::tex_hashed), pf(&RenderStats::tex_uploaded), pf(&RenderStats::surfaces),
           pf(&RenderStats::target_binds), pf(&RenderStats::depth_copies), pf(&RenderStats::depth_write_draws),
-          pf(&RenderStats::blended_depth_writes), pf(&RenderStats::l2_invalidates), pf(&RenderStats::collections),
+          pf(&RenderStats::blended_depth_writes), pf(&RenderStats::zconst_draws), pf(&RenderStats::l2_invalidates), pf(&RenderStats::collections),
           pf(&RenderStats::query_calls),
           pf(&RenderStats::bytes_queried) / 1048576.0, pf(&RenderStats::query_ticks) * g_ms_per_tick, pf(&RenderStats::query_written),
           g_streams.size() + g_index_lists.size(), g_vdata_bytes / 1048576.0, g_tex.size(), g_tex_bytes / 1048576.0,

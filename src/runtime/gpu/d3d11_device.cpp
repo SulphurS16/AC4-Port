@@ -119,8 +119,8 @@ void shader_stats(u32* compiled, u32* cached, double* seconds) {
 
 bool device_init(void* hwnd) {
   D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0, got;
-  HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, &fl, 1,
-                                 D3D11_SDK_VERSION, &g_dev.dev, &got, &g_dev.ctx);
+  HRESULT hr = D3D11CreateDevice(nullptr, cfg().warp ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, &fl, 1, D3D11_SDK_VERSION, &g_dev.dev, &got, &g_dev.ctx);
   if (FAILED(hr)) {
     LOG_E("gpu", "D3D11CreateDevice failed 0x%08lx", hr);
     return false;

@@ -23,6 +23,10 @@ std::atomic<bool> g_gameplay{false};
 constexpr const char* kMoviePlayer = "_libsail-control";
 int g_movies = 0;
 std::atomic<bool> g_movie{false};
+// The MULTIPLAYER screen's manager thread (from MULTIPLAYER on the title menu until it is left).
+constexpr const char* kMultiplayer = "MatchSelectManager";
+int g_multi = 0;
+std::atomic<bool> g_multiplayer{false};
 
 bool is_sortie(const std::string& name) {
   constexpr const char* kSuffix = "SortieScene";
@@ -41,11 +45,15 @@ void update() {
 
 bool mission_running() { return g_gameplay.load(std::memory_order_relaxed); }
 bool movie_playing() { return g_movie.load(std::memory_order_relaxed); }
+bool multiplayer_running() { return g_multiplayer.load(std::memory_order_relaxed); }
 
 void thread_started(const std::string& name) {
   if (name == kMoviePlayer) {
     std::lock_guard lk(g_mu);
     g_movie = ++g_movies > 0;
+  } else if (name == kMultiplayer) {
+    std::lock_guard lk(g_mu);
+    g_multiplayer = ++g_multi > 0;
   } else if (name == "FcsManager" || is_sortie(name)) {
     std::lock_guard lk(g_mu);
     (name == "FcsManager" ? g_fcs : g_sorties)++;
@@ -58,6 +66,10 @@ void thread_exited(const std::string& name) {
     std::lock_guard lk(g_mu);
     if (g_movies > 0) --g_movies;
     g_movie = g_movies > 0;
+  } else if (name == kMultiplayer) {
+    std::lock_guard lk(g_mu);
+    if (g_multi > 0) --g_multi;
+    g_multiplayer = g_multi > 0;
   } else if (name == "FcsManager" || is_sortie(name)) {
     std::lock_guard lk(g_mu);
     int& n = name == "FcsManager" ? g_fcs : g_sorties;

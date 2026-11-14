@@ -276,6 +276,7 @@ std::vector<Install> earlier_installs(const fs::path& self_exe) {
     i.files = path_of(rec, "install", "files");
     i.rpcs3 = path_of(rec, "install", "rpcs3");
     i.pup = path_of(rec, "install", "pup");
+    i.update = path_of(rec, "install", "update");
     i.version = rec.get_or("install", "version", "");
     add(i);
   }
@@ -302,6 +303,7 @@ std::vector<Install> earlier_installs(const fs::path& self_exe) {
       i.files = path_of(li, "paths", "files");
       i.rpcs3 = path_of(li, "paths", "rpcs3");
       i.pup = path_of(li, "paths", "pup");
+      i.update = path_of(li, "paths", "update");
       add(i);
     } catch (const std::exception&) {
     }
@@ -319,13 +321,14 @@ void record_install(const Install& i) {
   r.set("install", "files", narrow(i.files.wstring()));
   r.set("install", "rpcs3", narrow(i.rpcs3.wstring()));
   r.set("install", "pup", narrow(i.pup.wstring()));
+  r.set("install", "update", narrow(i.update.wstring()));
   save_record(r);
 }
 
 void forget_install(const fs::path& data) {
   ac4::Ini r = load_record();
   if (!same_path(path_of(r, "install", "data"), data)) return;
-  for (const char* k : {"data", "launcher", "version", "disc", "files", "rpcs3", "pup"}) r.remove("install", k);
+  for (const char* k : {"data", "launcher", "version", "disc", "files", "rpcs3", "pup", "update"}) r.remove("install", k);
   save_record(r);
 }
 

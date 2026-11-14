@@ -13,5 +13,8 @@ void thread_exited(const std::string& name);
 bool mission_running();
 // A movie plays: the system movie player runs (also behind the title screen; frame_policy.cpp).
 bool movie_playing();
+// The title's MULTIPLAYER screen and what it starts (ONLINE / SYSTEM LINK / SPLIT-SCREEN): its
+// thread MatchSelectManager is alive (run 20261114-101811). There each controller is a player.
+bool multiplayer_running();
 
 }  // namespace rt::game

@@ -22,6 +22,18 @@ constexpr int kSlots = 4;
 bool get(int slot, XINPUT_STATE* out);
 // Vibration of the controller in `slot` (XInput's motor speeds; PlayStation controllers: none yet).
 void vibrate(int slot, WORD left, WORD right);
+// Every controller in use as one (the game's one player, pad port 0; the ACFA port's 0.7.6): the
+// buttons of all, each trigger's and each stick's strongest. A controller counts once its state
+// has changed since it was found, so a device that only ever reports one state (an idle virtual
+// pad, a stuck trigger or stick) does not drive the game. False when no controller is connected.
+// Before, each device had a port of its own: a DualSense behind another device (Steam Input's or
+// DS4Windows' virtual pad, anything in XInput slot 0) drove the menus (the game takes any port
+// there) but not the AC (port 0, run 20261114-100337), and a second device for the same
+// controller moved the menus twice (players' reports, 2026-11-13).
+bool get_merged(XINPUT_STATE* out);
+// Two players on one PC (the game's MULTIPLAYER > SPLIT-SCREEN): the controllers in use one each,
+// in the order of their first input (player 0 = pad port 0). False when there is no such player.
+bool get_player(int player, XINPUT_STATE* out);
 
 // One input report of a PlayStation controller (report id first) in XInput's layout; false when
 // it is not a state report.

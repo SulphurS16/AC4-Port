@@ -35,6 +35,89 @@ std::string lower_generic(const fs::path& p) {
 }
 std::set<std::string> g_overlaid;  // logged once each
 
+// Mods (community patches; the ACFA port's 0.7.6): files in the mods folder beside the saves
+// (players: Saved Games\ARMORED CORE 4\mods; development runs: <data>\mods) replace the game's
+// files of the same path below PS3_GAME\USRDIR on the disc or below the game data's USRDIR
+// (/dev_hdd0/game/BLUS30027/USRDIR, where the game keeps its regulation and where the PS3 put the
+// regulation updates it downloaded), for reading only: a regulation (regulation.bin, which the game
+// reads from its game data; the disc's param\regulation.bin is only the source of that copy and
+// stays the disc's, so a mod never ends up in the game's own files), a modded archive. The
+// launcher's Game update row passes a regulation file of its own (--regulation), which stands for
+// regulation.bin. The folder is read once at start; the game's own files stay untouched, and its
+// own writes (the game data it creates on the first start) go to its files as before.
+fs::path g_mods;
+std::map<std::string, fs::path> g_mod_files;  // lower-case relative path ('/') -> the file
+std::mutex g_mod_mu;
+std::set<std::string> g_mod_noted;   // replacements already logged
+std::set<std::string> g_mod_dropped;  // mods whose file the game removed: its own file from then on (g_mod_mu)
+// What a path is resolved for: reading (a mod stands for the file), writing or creating (the game's
+// own file; the mod stays), removing or renaming (the game's own file; the mod ends for the run).
+enum class ModUse { Read, Write, Remove };
+
+std::string lower(std::string s) {
+  for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return s;
+}
+
+void scan_mods(const std::string& regulation) {
+  std::error_code ec;
+  if (!g_mods.empty() && fs::is_directory(g_mods, ec)) {
+    for (auto it = fs::recursive_directory_iterator(g_mods, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+      if (!it->is_regular_file(ec)) continue;
+      std::u8string rel = fs::relative(it->path(), g_mods, ec).generic_u8string();
+      g_mod_files[lower(std::string(rel.begin(), rel.end()))] = it->path();
+    }
+  }
+  if (!regulation.empty()) {
+    if (fs::is_regular_file(fs::path(regulation), ec)) {
+      if (g_mod_files.count("regulation.bin")) LOG_I("vfs", "the launcher's regulation is used instead of the mods folder's regulation.bin");
+      g_mod_files["regulation.bin"] = fs::path(regulation);
+    } else {
+      LOG_W("vfs", "the launcher's regulation %s is not there: the game's own is used", regulation.c_str());
+    }
+  }
+  if (!g_mod_files.empty()) {
+    std::string names;
+    for (const auto& [k, v] : g_mod_files) names += (names.empty() ? "" : ", ") + k;
+    LOG_I("vfs", "mods: %zu file(s) replace the game's: %s", g_mod_files.size(), names.c_str());
+  }
+}
+
+// The mod file for a guest path's components below a game files folder, or empty. The game removing
+// a modded file (restoring its game data after "The game data is damaged": it checks its regulation
+// against the md5.fmg inside, removes the file and copies the disc's again; runs 20261114-103206,
+// -103438) ends the mod for this run, so a damaged mod cannot hold the game in that question.
+// A mod replaces only a file the game has (`own`): on its game data's first start the game finds
+// no regulation.bin there and makes its own copy from the disc, and the mod applies from then on
+// (run 20261114-104725: the mod standing in for a missing file kept the game from making its copy).
+fs::path mod_for(const std::vector<std::string>& parts, ModUse use, const fs::path& own) {
+  if (g_mod_files.empty()) return {};
+  auto at = [&](std::initializer_list<const char*> pre) {
+    if (parts.size() <= pre.size()) return false;
+    size_t k = 0;
+    for (const char* p : pre)
+      if (_stricmp(parts[k++].c_str(), p) != 0) return false;
+    return true;
+  };
+  size_t base = at({"dev_bdvd", "PS3_GAME", "USRDIR"}) ? 3 : at({"app_home"}) ? 1 : at({"dev_hdd0", "game", "BLUS30027", "USRDIR"}) ? 4 : 0;
+  if (!base) return {};
+  std::string rel;
+  for (size_t k = base; k < parts.size(); ++k) rel += (rel.empty() ? "" : "/") + lower(parts[k]);
+  auto it = g_mod_files.find(rel);
+  if (it == g_mod_files.end()) return {};
+  std::lock_guard lk(g_mod_mu);
+  if (g_mod_dropped.count(it->first) || use == ModUse::Write) return {};
+  if (use == ModUse::Remove) {
+    g_mod_dropped.insert(it->first);
+    LOG_W("vfs", "mods: the game removes its %s: %s is not used any more in this run", rel.c_str(), it->second.string().c_str());
+    return {};
+  }
+  std::error_code ec;
+  if (!fs::is_regular_file(own, ec)) return {};
+  if (g_mod_noted.insert(rel).second) LOG_I("vfs", "mods: %s replaces the game's %s", it->second.string().c_str(), rel.c_str());
+  return it->second;
+}
+
 struct File {
   HANDLE h = INVALID_HANDLE_VALUE;
   std::string path;
@@ -77,7 +160,7 @@ s32 win_err(DWORD e) {
 }  // namespace
 
 void init(const std::string& disc, const std::string& hdd0, const std::string& hdd1, const std::string& flash,
-          const std::string& saves, const std::string& test_overlay) {
+          const std::string& saves, const std::string& test_overlay, const std::string& regulation) {
   g_disc = fs::path(disc);
   g_overlay = test_overlay.empty() ? fs::path() : fs::path(test_overlay);
   if (!g_overlay.empty()) LOG_W("vfs", "TEST OVERLAY %s: its files replace disc files (test aid)", test_overlay.c_str());
@@ -101,9 +184,19 @@ void init(const std::string& disc, const std::string& hdd0, const std::string& h
   }
   fs::create_directories(hdd0);
   fs::create_directories(hdd1);
+  g_mods = (saves.empty() ? fs::path(hdd0) : fs::path(saves)).parent_path() / "mods";
+  {
+    std::error_code ec;
+    fs::create_directories(g_mods, ec);  // there for the player to fill
+  }
+  scan_mods(regulation);
 }
 
-bool resolve(const std::string& gp, Resolved& out) {
+static bool resolve_use(const std::string& gp, Resolved& out, ModUse use);
+
+bool resolve(const std::string& gp, Resolved& out, bool mods) { return resolve_use(gp, out, mods ? ModUse::Read : ModUse::Write); }
+
+static bool resolve_use(const std::string& gp, Resolved& out, ModUse use) {
   // Normalise: split on '/', drop empty and '.', resolve '..' without escaping the mount.
   std::vector<std::string> parts;
   size_t i = 0;
@@ -134,9 +227,15 @@ bool resolve(const std::string& gp, Resolved& out) {
     h /= fs::path(std::u8string(parts[k].begin(), parts[k].end()));  // guest paths are UTF-8
   }
   out = {h, best->writable, best->prefix};
+  bool replaced = false;
   if (!g_replaced.empty() && !best->writable && (best->prefix == "/dev_bdvd" || best->prefix == "/app_home")) {
     auto it = g_replaced.find(lower_generic(h.lexically_relative(g_disc)));
-    if (it != g_replaced.end()) out.host = it->second;
+    if (it != g_replaced.end()) out.host = it->second, replaced = true;
+  }
+  // A mod, for reading (the port's own copies of disc files, such as the SYSTEM menu with the PC
+  // SETTINGS row, stay).
+  if (!replaced) {
+    if (fs::path m = mod_for(parts, use, out.host); !m.empty()) out = {m, false, best->prefix};
   }
   if (!g_overlay.empty() && !best->writable && (best->prefix == "/dev_bdvd" || best->prefix == "/app_home")) {
     std::error_code ec;
@@ -156,8 +255,9 @@ void replace(const std::string& disc_relative, const std::string& host) {
   LOG_I("vfs", "%s is served from %s", disc_relative.c_str(), host.c_str());
 }
 
-static s32 resolve_for(const std::string& path, bool want_write, Resolved& r) {
-  if (!resolve(path, r)) return CELL_ENOENT;
+static s32 resolve_for(const std::string& path, bool want_write, Resolved& r, bool removing = false) {
+  // Mods replace files for reading only (ModUse).
+  if (!resolve_use(path, r, !want_write ? ModUse::Read : removing ? ModUse::Remove : ModUse::Write)) return CELL_ENOENT;
   if (want_write && !r.writable) return CELL_EROFS;
   if (want_write) {
     try {
@@ -405,7 +505,7 @@ s32 mkdir(const std::string& path) {
 
 s32 rmdir(const std::string& path) {
   Resolved r;
-  s32 e = resolve_for(path, true, r);
+  s32 e = resolve_for(path, true, r, true);
   if (e != CELL_OK) return e;
   if (!RemoveDirectoryW(r.host.wstring().c_str())) return win_err(GetLastError());
   return CELL_OK;
@@ -413,7 +513,7 @@ s32 rmdir(const std::string& path) {
 
 s32 unlink(const std::string& path) {
   Resolved r;
-  s32 e = resolve_for(path, true, r);
+  s32 e = resolve_for(path, true, r, true);
   if (e != CELL_OK) return e;
   std::error_code ec;
   if (fs::is_directory(r.host, ec)) return CELL_EISDIR;
@@ -423,9 +523,9 @@ s32 unlink(const std::string& path) {
 
 s32 rename(const std::string& from, const std::string& to) {
   Resolved a, b;
-  s32 e = resolve_for(from, true, a);
+  s32 e = resolve_for(from, true, a, true);
   if (e != CELL_OK) return e;
-  e = resolve_for(to, true, b);
+  e = resolve_for(to, true, b, true);
   if (e != CELL_OK) return e;
   if (!MoveFileExW(a.host.wstring().c_str(), b.host.wstring().c_str(), MOVEFILE_REPLACE_EXISTING)) return win_err(GetLastError());
   return CELL_OK;

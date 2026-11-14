@@ -30,6 +30,11 @@ struct Found {
 Found find_files(const fs::path& disc, const fs::path& files);
 
 Status check_disc(const fs::path& disc, const Found& f);    // the disc and its decrypted EBOOT.elf
+// The Game update row (optional): AC4 has no update package; its updates were regulation files the
+// game downloaded while online (into its game data, USRDIR\regulation.bin). The row takes such a
+// file (or a community regulation): Ok for a regulation of the game (a BND3 archive, version
+// "verNNN" in its header), Bad for another file, Empty without one (the disc's Ver.1.00).
+Status check_regulation(const fs::path& file);
 Status check_modules(const fs::path& files, const Found& f);  // the 10 modules and flashATRAC.pic
 
 // The files the port needs and where they come from (shown when some are missing).

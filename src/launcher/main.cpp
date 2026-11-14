@@ -52,9 +52,9 @@ constexpr UINT WM_SETUP = WM_APP + 1, WM_CHECKED = WM_APP + 2, WM_GAME_EXIT = WM
 constexpr const wchar_t* kTitle = L"ARMORED CORE 4";
 constexpr const wchar_t* kSavePrefix = L"BLUS30027";  // the game's save folders
 enum Id {
-  kDiscEdit = 100, kFilesEdit, kDataEdit,
-  kDiscBrowse = 110, kFilesBrowse, kPrepFiles, kDataBrowse,
-  kDiscState = 120, kFilesState, kDataState,
+  kDiscEdit = 100, kFilesEdit, kDataEdit, kUpdateEdit,
+  kDiscBrowse = 110, kFilesBrowse, kPrepFiles, kDataBrowse, kUpdateBrowse,
+  kDiscState = 120, kFilesState, kDataState, kUpdateState,
   kPrepare = 140, kCancel, kProgress = 143, kStatus,
   kFps = 150, kMode, kResolution,
   kMore = 160,
@@ -98,6 +98,12 @@ std::wstring g_note;  // a message for the status line (a setup or game error) u
 
 std::mutex g_check_mu;
 Status g_disc_check, g_files_check;
+// The Game update row: a regulation file (inputs.h check_regulation), passed to the game at PLAY
+// (--regulation; it stands for the game's regulation.bin, vfs.h). A cleared row stays cleared.
+fs::path g_update;
+bool g_update_chosen = false;  // the player chose (even none): launcher.ini [paths] update
+Status g_update_check;
+fs::path g_eboot_ok;  // the game's EBOOT.elf when the game folder's check found it right, else empty
 bool g_checked = false;
 std::atomic<int> g_check_gen{0};
 std::atomic<int> g_size_gen{0};
@@ -190,6 +196,8 @@ void load_paths() {
   g_pup = p("pup");
   g_place_ok = p("place_ok");
   g_user_override = p("user");  // optional: settings and saves somewhere else than Saved Games
+  g_update_chosen = ini.get("paths", "update").has_value();
+  g_update = p("update");
 }
 
 void save_paths() {
@@ -203,6 +211,7 @@ void save_paths() {
     ini.set("paths", "rpcs3", narrow(g_rpcs3.wstring()));
     ini.set("paths", "pup", narrow(g_pup.wstring()));
     ini.set("paths", "place_ok", narrow(g_place_ok.wstring()));
+    if (g_update_chosen) ini.set("paths", "update", narrow(g_update.wstring()));
     std::error_code ec;
     fs::create_directories(g_ini_path.parent_path(), ec);
     ini.save(g_ini_path);
@@ -221,6 +230,7 @@ void note_install() {
   i.files = g_cfg.files;
   i.rpcs3 = g_rpcs3;
   i.pup = g_pup;
+  i.update = g_update;
   i.version = AC4_VERSION;
   record_install(i);
 }
@@ -390,8 +400,9 @@ void load_settings_controls() {
   SendMessageW(fps, CB_SETCURSEL, WPARAM(sel), 0);
   HWND mode = item(kMode);
   SendMessageW(mode, CB_RESETCONTENT, 0, 0);
-  for (const wchar_t* m : {L"Windowed", L"Fullscreen", L"Borderless fullscreen"}) SendMessageW(mode, CB_ADDSTRING, 0, LPARAM(m));
-  SendMessageW(mode, CB_SETCURSEL, d.mode == ac4::settings::Mode::Fullscreen ? 1 : d.mode == ac4::settings::Mode::Borderless ? 2 : 0, 0);
+  // The order of PC SETTINGS (windowed and borderless side by side, exclusive fullscreen last).
+  for (const wchar_t* m : {L"Windowed", L"Borderless fullscreen", L"Fullscreen"}) SendMessageW(mode, CB_ADDSTRING, 0, LPARAM(m));
+  SendMessageW(mode, CB_SETCURSEL, d.mode == ac4::settings::Mode::Borderless ? 1 : d.mode == ac4::settings::Mode::Fullscreen ? 2 : 0, 0);
   fill_resolutions(d);
 }
 
@@ -404,7 +415,7 @@ void save_setting(int id) {
       const auto& choices = ac4::settings::fps_choices();
       if (sel >= 0 && sel < int(choices.size())) ini.set("display", "fps", ac4::settings::fps_text(choices[size_t(sel)].fps));
     } else if (id == kMode) {
-      d.mode = sel == 1 ? ac4::settings::Mode::Fullscreen : sel == 2 ? ac4::settings::Mode::Borderless : ac4::settings::Mode::Windowed;
+      d.mode = sel == 1 ? ac4::settings::Mode::Borderless : sel == 2 ? ac4::settings::Mode::Fullscreen : ac4::settings::Mode::Windowed;
       ini.set("display", "mode", ac4::settings::mode_name(d.mode));
     } else if (id == kResolution && sel >= 0 && sel < int(g_res_items.size())) {
       const ModeItem& m = g_res_items[size_t(sel)];
@@ -487,6 +498,7 @@ void start_checks() {
       std::lock_guard lk(g_check_mu);
       if (gen != g_check_gen) return;
       g_disc_check = d;
+      g_eboot_ok = d.verdict == Verdict::Ok ? f.eboot_elf : fs::path();
       g_files_check = m;
       g_checked = true;
     }
@@ -592,15 +604,24 @@ void update_buttons() {
   show(kProgress, g_setup.running());
   EnableWindow(item(kPrepare), !playing && inputs_ok() && data_ok());
   EnableWindow(item(kPlay), !busy && !playing && g_ready && inputs_ok());
-  for (int id : {kDiscBrowse, kFilesBrowse, kDiscEdit, kFilesEdit, kDataBrowse}) EnableWindow(item(id), !busy && !playing);
+  for (int id : {kDiscBrowse, kUpdateBrowse, kFilesBrowse, kDiscEdit, kUpdateEdit, kFilesEdit, kDataBrowse}) EnableWindow(item(id), !busy && !playing);
   for (int id : {kFps, kMode, kResolution}) EnableWindow(item(id), !playing && !g_cfg.data.empty());
   if (ac4::settings::Mode m = read_display().mode; m == ac4::settings::Mode::Borderless) EnableWindow(item(kResolution), FALSE);
   if (!g_setup.running() && !g_prep.running()) set_text(kStatus, idle_status());
 }
 
+void show_update_row() {
+  g_update_check = check_regulation(g_update);
+  set_text(kUpdateState, widen(g_update_check.text));
+  InvalidateRect(item(kUpdateState), nullptr, TRUE);
+}
+
 void refresh_paths_from_ui() {
   g_cfg.disc = get_text(kDiscEdit);
   g_cfg.files = get_text(kFilesEdit);
+  fs::path update = get_text(kUpdateEdit);
+  if (update != g_update) g_update = update, g_update_chosen = true;  // typed or browsed: the player's choice, even none
+  show_update_row();
   save_paths();
   move_to_user_dir();
   set_text(kDiscState, L"Checking...");
@@ -823,7 +844,9 @@ void offer_earlier_install() {
   g_cfg.files = i.files;
   if (!i.rpcs3.empty()) g_rpcs3 = i.rpcs3;
   if (!i.pup.empty()) g_pup = i.pup;
+  if (!i.update.empty()) g_update = i.update, g_update_chosen = true;
   set_text(kDiscEdit, g_cfg.disc.wstring());
+  set_text(kUpdateEdit, g_update.wstring());
   g_cfg.data = i.data;
   if (a == kMoveIt) {
     if (move_data_to(here)) return;
@@ -941,8 +964,19 @@ void on_removed(RemoveResult* r) {
 // ---- Prepare files: the player's RPCS3 makes the decrypted files (rpcs3.h) ----
 void prepare_files() {
   std::error_code ec;
-  if (!fs::is_regular_file(g_cfg.disc / "PS3_GAME" / "USRDIR" / "EBOOT.BIN", ec)) {
-    message(L"Choose the game's folder first (the one with PS3_GAME).", MB_ICONINFORMATION);
+  fs::path eboot_elf;
+  {
+    std::lock_guard lk(g_check_mu);
+    eboot_elf = g_eboot_ok;
+  }
+  // The game's executable: its EBOOT.elf when the game folder's check found it right (some game
+  // folders hold only that, without EBOOT.BIN: the ACFA port's player report of 2026-11-04, also
+  // seen with AC4), else EBOOT.BIN to decrypt.
+  if (eboot_elf.empty() && !fs::is_regular_file(g_cfg.disc / "PS3_GAME" / "USRDIR" / "EBOOT.BIN", ec)) {
+    message(g_cfg.disc.empty() ? L"Choose the game's folder first (the one with PS3_GAME)."
+                               : L"The game's folder has no PS3_GAME\\USRDIR\\EBOOT.BIN, the game itself. Choose the folder of the "
+                                 L"complete game (the one with PS3_GAME).",
+            MB_ICONINFORMATION);
     return;
   }
   if (!confirm_place()) return;  // the files go into the game data folder
@@ -975,6 +1009,7 @@ void prepare_files() {
   job.rpcs3_exe = exe;
   job.pup = pup;
   job.disc = g_cfg.disc;
+  job.eboot_elf = eboot_elf;
   job.work = g_cfg.data / "rpcs3-work";
   job.out = g_cfg.data / "decrypted";
   g_note.clear();
@@ -1022,6 +1057,7 @@ void play(bool safe_mode) {
   std::wstring cmd = quote_arg(exe.wstring()) + L" --data " + quote_arg(g_cfg.data.wstring()) + L" --user " + quote_arg(user_dir().wstring()) +
                      L" --disc " + quote_arg(g_cfg.disc.wstring()) + L" --flash " + quote_arg(Setup::flash_dir(g_cfg).wstring()) + L" --keep-runs 10";
   if (safe_mode) cmd += L" --safe-mode";
+  if (!g_update.empty() && g_update_check.verdict == Verdict::Ok) cmd += L" --regulation " + quote_arg(g_update.wstring());
   STARTUPINFOW si{};
   si.cb = sizeof si;
   PROCESS_INFORMATION pi{};
@@ -1058,13 +1094,14 @@ struct Place {
   int x, y, w, h;
 };
 const Place kPlaces[] = {
-    {kDiscEdit, 124, 14, 324, 24},   {kDiscBrowse, 454, 13, 90, 26},   {kDiscState, 124, 41, 420, 18},
-    {kFilesEdit, 124, 68, 324, 24},  {kFilesBrowse, 454, 67, 90, 26},  {kFilesState, 124, 95, 420, 18},
-    {kDataEdit, 124, 122, 324, 24},  {kDataBrowse, 454, 121, 90, 26},  {kDataState, 124, 149, 420, 18},
-    {kPrepare, 16, 178, 98, 28},     {kCancel, 16, 178, 98, 28},       {kPrepFiles, 16, 178, 98, 28},
-    {kStatus, 124, 178, 420, 34},    {kProgress, 124, 216, 420, 10},
-    {kMode, 124, 240, 190, 300},     {kResolution, 320, 240, 224, 300}, {kFps, 124, 274, 190, 300},
-    {kMore, 16, 320, 98, 30},        {kPlay, 334, 308, 210, 50},
+    {kDiscEdit, 124, 14, 324, 24},    {kDiscBrowse, 454, 13, 90, 26},    {kDiscState, 124, 41, 420, 18},
+    {kUpdateEdit, 124, 68, 324, 24},  {kUpdateBrowse, 454, 67, 90, 26},  {kUpdateState, 124, 95, 420, 18},
+    {kFilesEdit, 124, 122, 324, 24},  {kFilesBrowse, 454, 121, 90, 26},  {kFilesState, 124, 149, 420, 18},
+    {kDataEdit, 124, 176, 324, 24},   {kDataBrowse, 454, 175, 90, 26},   {kDataState, 124, 203, 420, 18},
+    {kPrepare, 16, 232, 98, 28},      {kCancel, 16, 232, 98, 28},        {kPrepFiles, 16, 232, 98, 28},
+    {kStatus, 124, 232, 420, 34},     {kProgress, 124, 270, 420, 10},
+    {kMode, 124, 294, 190, 300},      {kResolution, 320, 294, 224, 300}, {kFps, 124, 328, 190, 300},
+    {kMore, 16, 374, 98, 30},         {kPlay, 334, 362, 210, 50},
 };
 struct Label {
   int x, y, w, h;
@@ -1072,12 +1109,13 @@ struct Label {
 };
 const Label kLabels[] = {
     {16, 17, 104, 20, L"Game folder"},
-    {16, 71, 104, 20, L"Decrypted files"},
-    {16, 125, 104, 20, L"Game data"},
-    {16, 243, 104, 20, L"Display"},
-    {16, 277, 104, 20, L"Frame rate"},
+    {16, 71, 104, 20, L"Game update"},
+    {16, 125, 104, 20, L"Decrypted files"},
+    {16, 179, 104, 20, L"Game data"},
+    {16, 297, 104, 20, L"Display"},
+    {16, 331, 104, 20, L"Frame rate"},
 };
-constexpr int kClientW = 560, kClientH = 372;
+constexpr int kClientW = 560, kClientH = 426;
 
 void layout() {
   for (const Place& p : kPlaces) SetWindowPos(item(p.id), nullptr, S(p.x), S(p.y), S(p.w), S(p.h), SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1109,14 +1147,16 @@ void create_controls() {
     CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, g_wnd, HMENU(INT_PTR(id)), g_inst, nullptr);
   };
   for (size_t i = 0; i < std::size(kLabels); ++i) make(L"STATIC", kLabels[i].text, SS_LEFT, kLabel + int(i));
-  for (int i = 0; i < 2; ++i) {
-    make(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, kDiscEdit + i, WS_EX_CLIENTEDGE);
-    make(L"BUTTON", L"Browse...", WS_TABSTOP | BS_PUSHBUTTON, kDiscBrowse + i);
-    make(L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS, kDiscState + i);
-  }
-  make(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY, kDataEdit, WS_EX_CLIENTEDGE);
-  make(L"BUTTON", L"Change...", WS_TABSTOP | BS_PUSHBUTTON, kDataBrowse);
-  make(L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS, kDataState);
+  // The rows in tab order: a path, its button, the line below it.
+  auto row = [&](int edit, DWORD edit_style, int button, const wchar_t* button_text, int state) {
+    make(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL | edit_style, edit, WS_EX_CLIENTEDGE);
+    make(L"BUTTON", button_text, WS_TABSTOP | BS_PUSHBUTTON, button);
+    make(L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS, state);
+  };
+  row(kDiscEdit, 0, kDiscBrowse, L"Browse...", kDiscState);
+  row(kUpdateEdit, 0, kUpdateBrowse, L"Browse...", kUpdateState);
+  row(kFilesEdit, 0, kFilesBrowse, L"Browse...", kFilesState);
+  row(kDataEdit, ES_READONLY, kDataBrowse, L"Change...", kDataState);
   make(L"BUTTON", L"Prepare files", WS_TABSTOP | BS_PUSHBUTTON, kPrepFiles);
   make(L"BUTTON", L"Set up", WS_TABSTOP | BS_PUSHBUTTON, kPrepare);
   make(L"BUTTON", L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, kCancel);
@@ -1249,6 +1289,7 @@ void show_checks() {
 
 Verdict verdict_of(int id) {
   if (id == kDataState) return data_row_bad() ? Verdict::Bad : Verdict::Empty;
+  if (id == kUpdateState) return g_update_check.verdict;
   std::lock_guard lk(g_check_mu);
   if (!g_checked) return Verdict::Empty;
   return id == kDiscState ? g_disc_check.verdict : g_files_check.verdict;
@@ -1261,8 +1302,8 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
     case WM_COMMAND: {
       int id = LOWORD(wp), code = HIWORD(wp);
-      if (code == EN_KILLFOCUS && (id == kDiscEdit || id == kFilesEdit)) {
-        if (get_text(id) != (id == kDiscEdit ? g_cfg.disc : g_cfg.files).wstring()) refresh_paths_from_ui();
+      if (code == EN_KILLFOCUS && (id == kDiscEdit || id == kUpdateEdit || id == kFilesEdit)) {
+        if (get_text(id) != (id == kDiscEdit ? g_cfg.disc : id == kUpdateEdit ? g_update : g_cfg.files).wstring()) refresh_paths_from_ui();
         return 0;
       }
       if (code == CBN_SELCHANGE && (id == kFps || id == kMode || id == kResolution)) {
@@ -1301,6 +1342,12 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case kDiscBrowse: {
           fs::path p = pick_folder(L"The game's folder (it contains PS3_GAME)", g_cfg.disc);
           if (!p.empty()) set_text(kDiscEdit, p.wstring()), refresh_paths_from_ui();
+          break;
+        }
+        case kUpdateBrowse: {
+          fs::path p = pick(false, L"Game update: a regulation file of the game (regulation.bin)", g_update.empty() ? g_cfg.disc : g_update,
+                            L"Regulation", L"*.bin");
+          if (!p.empty()) set_text(kUpdateEdit, p.wstring()), refresh_paths_from_ui();
           break;
         }
         case kFilesBrowse: {
@@ -1449,7 +1496,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       int id = GetDlgCtrlID(HWND(lp));
       HDC dc = HDC(wp);
       SetBkMode(dc, TRANSPARENT);
-      if (id == kDiscState || id == kFilesState || id == kDataState) SetTextColor(dc, verdict_color(verdict_of(id)));
+      if (id == kDiscState || id == kUpdateState || id == kFilesState || id == kDataState) SetTextColor(dc, verdict_color(verdict_of(id)));
       return LRESULT(GetSysColorBrush(COLOR_WINDOW));
     }
     case WM_DPICHANGED: {
@@ -1583,6 +1630,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
   make_fonts();
   layout();
   set_text(kDiscEdit, g_cfg.disc.wstring());
+  set_text(kUpdateEdit, g_update.wstring());
   set_text(kFilesEdit, g_cfg.files.wstring());
   refresh_paths_from_ui();
   refresh_data_row();

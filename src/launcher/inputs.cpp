@@ -3,6 +3,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cctype>
+#include <cstdio>
+#include <cstring>
 #include <deque>
 #include <vector>
 
@@ -124,6 +127,27 @@ Status check_disc(const fs::path& disc, const Found& f) {
     return {Verdict::Bad, "EBOOT.elf is not the decrypted executable of disc 01.01 (decrypt EBOOT.BIN again).",
             narrow(f.eboot_elf.wstring()) + ": sha256 " + h + ", expected " + ki::kEbootElf.sha256};
   return {Verdict::Ok, std::string(ki::kTitleName) + " (" + ki::kTitleId + ", disc " + version + "), EBOOT.elf", ""};
+}
+
+Status check_regulation(const fs::path& file) {
+  if (file.empty()) return {Verdict::Empty, "Optional: a regulation update (regulation.bin); without one the disc's Ver.1.00.", ""};
+  std::error_code ec;
+  if (!fs::is_regular_file(file, ec)) return {Verdict::Bad, "Not found: " + narrow(file.wstring()), ""};
+  char h[16] = {};
+  if (FILE* f = _wfopen(file.c_str(), L"rb")) {
+    size_t n = std::fread(h, 1, sizeof h, f);
+    std::fclose(f);
+    if (n < sizeof h) std::memset(h, 0, sizeof h);
+  }
+  if (std::memcmp(h, "BND3", 4) != 0)
+    return {Verdict::Bad, "Not a regulation file of the game (regulation.bin, a BND3 archive).", narrow(file.wstring())};
+  // The archive's version field: "ver100" on the disc (Ver.1.00).
+  bool numbered = std::memcmp(h + 4, "ver", 3) == 0 && std::isdigit(static_cast<unsigned char>(h[7])) &&
+                  std::isdigit(static_cast<unsigned char>(h[8])) && std::isdigit(static_cast<unsigned char>(h[9]));
+  if (!numbered) return {Verdict::Ok, "A regulation without a version number: the game uses it instead of the disc's.", ""};
+  std::string v = std::string(1, h[7]) + "." + h[8] + h[9];
+  if (v == "1.00") return {Verdict::Ok, "Regulation Ver.1.00, the disc's own: nothing changes.", ""};
+  return {Verdict::Ok, "Regulation Ver." + v + ": the game uses it instead of the disc's Ver.1.00.", ""};
 }
 
 Status check_modules(const fs::path& files, const Found& f) {

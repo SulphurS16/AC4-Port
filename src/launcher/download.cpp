@@ -25,6 +25,7 @@ struct Request {
   Handle session, conn, req;
   unsigned long long total = 0;  // Content-Length, 0 when not sent
   std::string error;
+  bool transient = false;  // the error may pass: the connection, or a server's 5xx / 429 / 408
 };
 
 void open_request(Request& r, const std::wstring& url) {
@@ -56,6 +57,7 @@ void open_request(Request& r, const std::wstring& url) {
   }
   if (!WinHttpSendRequest(r.req.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) || !WinHttpReceiveResponse(r.req.h, nullptr)) {
     r.error = "download failed (" + narrow(host) + ", error " + std::to_string(GetLastError()) + "): check the internet connection";
+    r.transient = true;
     return;
   }
   DWORD status = 0, size = sizeof status;
@@ -63,6 +65,7 @@ void open_request(Request& r, const std::wstring& url) {
                       WINHTTP_NO_HEADER_INDEX);
   if (status != 200) {
     r.error = "download failed: the server answered " + std::to_string(status) + " for " + narrow(url);
+    r.transient = status >= 500 || status == 429 || status == 408;
     return;
   }
   wchar_t lenbuf[32] = {};
@@ -71,13 +74,17 @@ void open_request(Request& r, const std::wstring& url) {
     r.total = _wcstoui64(lenbuf, nullptr, 10);
 }
 
-}  // namespace
-
-std::string download(const std::wstring& url, const std::filesystem::path& to,
-                     const std::function<void(unsigned long long, unsigned long long)>& progress, const std::atomic<bool>& cancel) {
+// One attempt; *transient: a failure that may pass (tried again by download()).
+std::string download_once(const std::wstring& url, const std::filesystem::path& to,
+                          const std::function<void(unsigned long long, unsigned long long)>& progress, const std::atomic<bool>& cancel,
+                          bool* transient) {
+  *transient = false;
   Request r;
   open_request(r, url);
-  if (!r.error.empty()) return r.error;
+  if (!r.error.empty()) {
+    *transient = r.transient;
+    return r.error;
+  }
   std::filesystem::path part = to;
   part += ".part";
   std::error_code ec;
@@ -95,6 +102,7 @@ std::string download(const std::wstring& url, const std::filesystem::path& to,
     DWORD n = 0;
     if (!WinHttpReadData(r.req.h, buf.data(), DWORD(buf.size()), &n)) {
       err = "download interrupted (error " + std::to_string(GetLastError()) + ")";
+      *transient = true;
       break;
     }
     if (!n) break;
@@ -106,7 +114,7 @@ std::string download(const std::wstring& url, const std::filesystem::path& to,
     progress(got, r.total);
   }
   std::fclose(f);
-  if (err.empty() && r.total && got != r.total) err = "download incomplete";
+  if (err.empty() && r.total && got != r.total) err = "download incomplete", *transient = true;
   if (!err.empty()) {
     std::filesystem::remove(part, ec);
     return err;
@@ -114,6 +122,23 @@ std::string download(const std::wstring& url, const std::filesystem::path& to,
   std::filesystem::rename(part, to, ec);
   if (ec) return "cannot rename " + narrow(part.wstring());
   return "";
+}
+
+}  // namespace
+
+// A failure that may pass (no connection for a moment, a server's 5xx such as GitHub's 504 Gateway
+// Timeout: the ACFA port's GitHub issue #8, for both ports) is tried again twice, after 3 and 10 s.
+std::string download(const std::wstring& url, const std::filesystem::path& to,
+                     const std::function<void(unsigned long long, unsigned long long)>& progress, const std::atomic<bool>& cancel) {
+  const int kWaits[] = {3, 10};
+  std::string err;
+  for (int attempt = 0;; ++attempt) {
+    bool transient = false;
+    err = download_once(url, to, progress, cancel, &transient);
+    if (err.empty() || !transient || cancel.load() || attempt >= int(std::size(kWaits))) break;
+    for (int t = 0; t < kWaits[attempt] * 10 && !cancel.load(); ++t) Sleep(100);
+  }
+  return err;
 }
 
 }  // namespace launcher

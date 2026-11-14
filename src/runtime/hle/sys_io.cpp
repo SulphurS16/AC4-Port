@@ -1,7 +1,10 @@
 // HLE: sys_io (cellPad, cellKb, cellMouse).
-// Pad port 0 combines the first controller (gamepads.h: XInput controllers, then PlayStation
-// controllers) with the keyboard and mouse; ports 1-3 map to further controllers when connected. Keyboard/mouse libraries report no device (the game
-// is played with the pad; host keyboard input feeds the pad emulation instead).
+// Pad port 0 combines every controller in use (gamepads.h get_merged: XInput and PlayStation
+// controllers) with the keyboard and mouse; ports 1-3 stay empty, except on the title's
+// MULTIPLAYER screen (SPLIT-SCREEN: two players on one PC), where each controller in use has a
+// port of its own in the order of first use (gamepads.h get_player). Keyboard/mouse libraries
+// report no device (the game is played with the pad; host keyboard input feeds the pad emulation
+// instead).
 #define WIN32_LEAN_AND_MEAN
 #include <algorithm>
 #include <atomic>
@@ -24,6 +27,7 @@
 #include "runtime/hle.h"
 #include "runtime/lv2/lv2.h"
 #include "runtime/bindings.h"
+#include "runtime/game/frame_policy.h"
 #include "runtime/game/menu_mouse.h"
 #include "runtime/gpu/input_hooks.h"
 #include "runtime/gpu/window.h"
@@ -65,8 +69,9 @@ u8 axis(SHORT v) { return u8(std::clamp((int(v) + 32768) >> 8, 0, 255)); }
 
 PadState read_port(u32 port, bool deliver = false) {
   PadState s;
-  XINPUT_STATE xs{};  // the controller in this slot, in XInput's layout (gamepads.h)
-  bool xin = !input_isolated() && pads::get(int(port), &xs);
+  XINPUT_STATE xs{};  // the controllers for this port, in XInput's layout (gamepads.h)
+  bool xin = !input_isolated() &&
+             (game::multiplayer_running() ? pads::get_player(int(port), &xs) : port == 0 && pads::get_merged(&xs));
   if (xin) {
     s.connected = true;
     const auto& g = xs.Gamepad;

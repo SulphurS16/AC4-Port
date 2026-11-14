@@ -14,6 +14,7 @@ Not affiliated with, endorsed or sponsored by FromSoftware, SEGA, Sony Interacti
 - High frame rates. 30, 60, 120, 144, your monitor's refresh rate or uncapped and the same game speed at every frame rate. Menus and movies stay at 60.
 - Full mouse support. By default the mouse works like a precise right stick, with raw input: your AC turns exactly as far as you move it. A camera mode is in PC SETTINGS. The mouse also works in the game's menus, including the ACSIS garage.
 - PC SETTINGS inside the game. A row the port adds to the game's own SYSTEM menu: display, frame rate, mouse and keys settings all ingame.
+- Regulations and mods. The launcher takes a regulation file (the game's update data), and a mods folder takes community patches.
 
 <img width="2560" height="1440" alt="acfa_Yv4vGErYvv" src="https://github.com/user-attachments/assets/6a63daac-5396-4723-833d-4b9519c8006d" />
 
@@ -66,7 +67,7 @@ Controllers work like the PS3 pad and can be connected at any time:
 - **PlayStation** (DUALSHOCK 4, DualSense, DualSense Edge; USB or Bluetooth): Options = START; Share / Create or the touchpad click = SELECT. No extra program needed. No vibration yet.
 - **Xbox and other XInput controllers:** A = Cross, B = Circle, X = Square, Y = Triangle, LB / RB = L1 / R1, LT / RT = L2 / R2, Menu = START, View = SELECT, stick clicks = L3 / R3.
 
-With several controllers connected, the first one plays (Xbox-style controllers first).
+All connected controllers play together as one pad, so a second device for the same controller (for example Steam Input's or DS4Windows' virtual controller beside the DualSense itself) does no harm. In **MULTIPLAYER > SPLIT-SCREEN** each controller is a player of its own; the first one used is player 1. A controller's buttons are set in the game's own options (**SYSTEM > CONTROL OPTIONS**); PC SETTINGS changes the keyboard and mouse.
 
 # Mouse and keyboard support
 
@@ -108,6 +109,16 @@ All keys can be changed in game under **SYSTEM > PC SETTINGS**, which also shows
 - RPCS3 saves should work as they are. Copy the same 'BLUS30027...' folders from RPCS3's savedata folder.
 
 Only saves from the US version (BLUS30027) are found.
+
+## Game update, mods and community regulations
+
+ARMORED CORE 4 has no update package: its updates were regulation files (the balance data) that the game downloaded while online, into its game data. If you have such a file (`regulation.bin`, for example from the game data folder `BLUS30027\USRDIR` of your PS3 or RPCS3), choose it under **Game update** in the launcher. The launcher shows its version, and the game uses it instead of the disc's Ver.1.00; choose the regulation in game under **SYSTEM > REGULATIONS**. Clear the row to go back.
+
+Files in `Saved Games\ARMORED CORE 4\mods` replace the game's files of the same name, while the game's own files stay untouched:
+- **A community regulation:** put its `regulation.bin` into `mods`.
+- **Other mods:** use the same folder layout as the game's `PS3_GAME\USRDIR`, for example `mods\bind\...`.
+
+The folder is read when the game starts. Remove the files to play with the game's own data again. The game checks its regulation: one it does not accept shows "The game data is damaged" at the start. Choose OK there (the game goes on with its own regulation) and remove the file.
 
 ## Community
 

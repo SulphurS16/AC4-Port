@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.7.0 (2026-11-14)
+
+Fixes from players' reports (controllers, the sky on AMD graphics cards, DISPLAY MODE, Prepare
+files) and two features: a Game update row in the launcher for regulation files, and a mods folder
+for community patches. Most of it follows the ACFA port's 0.7.1 to 0.7.6.
+
+Updating from 0.6.x: unzip the new release and start its launcher, then click **Set up**: it
+rebuilds what changed, which takes a few minutes.
+
+Controllers
+- Every controller you use now drives the game as one player. Before, each device had a player
+  slot of its own: a DualSense behind another device (Steam Input's or DS4Windows' virtual pad, or
+  anything else that Windows lists as an Xbox controller) worked in the menus but could not move
+  the AC, and a second device for the same controller moved the menus twice. A device counts once
+  you press something on it, so an idle virtual pad no longer takes your place.
+- Two players on one PC (MULTIPLAYER > SPLIT-SCREEN): there each controller is a player of its
+  own, the first one used being player 1.
+
+Graphics
+- Fixed: on AMD graphics cards the sky flickered, with whole triangles of it in a darker shade
+  (missions, the SIMULATOR). The sky's dome is no longer clipped at the camera.
+
+PC SETTINGS
+- DISPLAY MODE: the order is now WINDOWED / BORDERLESS FULLSCREEN / FULLSCREEN, and a new choice
+  takes effect once you stop changing it (0.7 s) or when you leave the screen. Before, every step
+  switched the display at once, and the step from borderless to windowed passed through exclusive
+  fullscreen, a display switch that leaves some monitors black for seconds. The same applies to the
+  fullscreen resolution and refresh rate. The launcher's list has the same order.
+
+Launcher
+- New **Game update** row under Game folder (optional). ARMORED CORE 4 has no update package: its
+  updates were regulation files (the balance data) that the game downloaded while online. Choose
+  such a file (regulation.bin) and the game uses it instead of the disc's Ver.1.00. The row shows
+  the file's version; clear it to go back.
+- Fixed: Prepare files said "Choose the game's folder first" and did nothing when the game folder
+  held the decrypted EBOOT.elf but not EBOOT.BIN, although the folder was checked green. It now
+  uses that EBOOT.elf and decrypts only the system modules with RPCS3. When the game itself
+  (EBOOT.BIN) is really missing, the message says so.
+- Set up tries a download again (twice) when the server answers with a temporary error such as
+  504, instead of stopping.
+
+Mods
+- Community patches: files in **Saved Games\ARMORED CORE 4\mods** replace the game's files of the
+  same path below PS3_GAME\USRDIR (for example regulation.bin for a regulation, or a modded
+  archive). The game's own files stay untouched; remove a file from the folder to go back. The
+  game checks its regulation file: one it does not accept (a changed file without its matching
+  check) shows "The game data is damaged" at the start; OK there restores the game's own and the
+  game goes on with it. Then remove the file (or clear the Game update row).
+
 ## 0.6.0 (2026-10-29)
 
 Two mouse modes, keys under every key type, the mouse in the garage, movies on two-core PCs, and
